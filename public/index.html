@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Gestión de Órdenes de Fabricación</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <style>
+        body {
+            padding-top: 20px;
+            background-color: #f8f9fa;
+        }
+        .card {
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .card-header {
+            font-weight: bold;
+            background-color: #f1f1f1;
+        }
+        .btn-group-vertical {
+            width: 100%;
+        }
+        .btn-group-vertical .btn {
+            margin-bottom: 5px;
+            text-align: left;
+        }
+        .counter-btn {
+            width: 40px;
+            height: 40px;
+            font-weight: bold;
+        }
+        .counter-value {
+            width: 60px;
+            text-align: center;
+        }
+        .active-order {
+            border: 2px solid #28a745;
+        }
+        .paused-order {
+            border: 2px solid #ffc107;
+        }
+        .completed-order {
+            border: 2px solid #6c757d;
+        }
+        .counter-container {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .counter-label {
+            width: 180px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-center mb-4">Sistema de Gestión de Órdenes de Fabricación</h1>
+        
+        <!-- Formulario para crear nueva orden -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h3>Crear Nueva Orden de Fabricación</h3>
+            </div>
+            <div class="card-body">
+                <form id="nuevaOrdenForm">
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="codigoOrden" class="form-label">Código de Orden</label>
+                            <input type="text" class="form-control" id="codigoOrden" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label for="codigoArticulo" class="form-label">Código de Artículo</label>
+                            <input type="text" class="form-control" id="codigoArticulo" required>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="producto" class="form-label">Producto</label>
+                        <input type="text" class="form-control" id="producto" required>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="cantidadProducir" class="form-label">Cantidad a Producir</label>
+                            <input type="number" class="form-control" id="cantidadProducir" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label for="numeroCajas" class="form-label">Número de Cajas</label>
+                            <input type="number" class="form-control" id="numeroCajas" required>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="botesPorCaja" class="form-label">Botes por Caja</label>
+                            <input type="number" class="form-control" id="botesPorCaja">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label for="numeroCorteSanitarioInicial" class="form-label">Número Corte Sanitario Inicial</label>
+                            <input type="text" class="form-control" id="numeroCorteSanitarioInicial" required>
+                        </div>
+                    </div>
+                    <div class="mb-3 form-check">
+                        <input type="checkbox" class="form-check-input" id="repercap">
+                        <label class="form-check-label" for="repercap">Repercap</label>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Crear Orden</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Lista de órdenes -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h3>Órdenes de Fabricación</h3>
+                <button id="refreshBtn" class="btn btn-outline-secondary">
+                    <i class="bi bi-arrow-clockwise"></i> Actualizar
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="ordenesContainer" class="row">
+                    <!-- Las órdenes se cargarán aquí dinámicamente -->
+                    <div class="col-12 text-center py-5" id="noOrdenesMsg">
+                        <p class="text-muted">No hay órdenes disponibles</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Plantilla para tarjeta de orden -->
+    <template id="ordenTemplate">
+        <div class="col-md-6 mb-4">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span class="orden-codigo"></span>
+                    <span class="badge"></span>
+                </div>
+                <div class="card-body">
+                    <h5 class="card-title orden-producto"></h5>
+                    <p class="card-text">
+                        <strong>Código Artículo:</strong> <span class="orden-codigo-articulo"></span><br>
+                        <strong>Cantidad a Producir:</strong> <span class="orden-cantidad"></span><br>
+                        <strong>Número de Cajas:</strong> <span class="orden-cajas"></span><br>
+                        <strong>Botes por Caja:</strong> <span class="orden-botes-caja"></span><br>
+                        <strong>Corte Sanitario Inicial:</strong> <span class="orden-corte-sanitario"></span><br>
+                        <strong>Repercap:</strong> <span class="orden-repercap"></span>
+                    </p>
+                    
+                    <div class="mt-4">
+                        <h6>Contadores:</h6>
+                        
+                        <!-- Contador de Unidades Ponderales -->
+                        <div class="counter-container">
+                            <span class="counter-label">Unidades Ponderales:</span>
+                            <button class="btn btn-outline-primary counter-btn decrement-btn" data-counter="unidadesPonderalTotal">-</button>
+                            <input type="number" class="form-control mx-2 counter-value" data-counter="unidadesPonderalTotal" value="0" readonly>
+                            <button class="btn btn-outline-primary counter-btn increment-btn" data-counter="unidadesPonderalTotal">+</button>
+                        </div>
+                        
+                        <!-- Contador de Cajas -->
+                        <div class="counter-container">
+                            <span class="counter-label">Cajas Completadas:</span>
+                            <button class="btn btn-outline-primary counter-btn decrement-btn" data-counter="cajasCompletadas">-</button>
+                            <input type="number" class="form-control mx-2 counter-value" data-counter="cajasCompletadas" value="0" readonly>
+                            <button class="btn btn-outline-primary counter-btn increment-btn" data-counter="cajasCompletadas">+</button>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-4">
+                        <h6>Acciones:</h6>
+                        <div class="btn-group-vertical">
+                            <button class="btn btn-success btn-iniciar">Iniciar Orden</button>
+                            <button class="btn btn-warning btn-pausar">Pausar Orden</button>
+                            <button class="btn btn-danger btn-finalizar">Finalizar Orden</button>
+                            <button class="btn btn-secondary btn-cierre-fabricacion">Registrar Cierre de Fabricación</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-footer text-muted">
+                    <small>Creada: <span class="orden-fecha-creacion"></span></small><br>
+                    <small>Estado: <span class="orden-estado"></span></small>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Modal para cierre de fabricación -->
+    <div class="modal fade" id="cierreFabricacionModal" tabindex="-1" aria-labelledby="cierreFabricacionModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="cierreFabricacionModalLabel">Registrar Cierre de Fabricación</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="cierreFabricacionForm">
+                        <div class="mb-3">
+                            <label for="numeroCorteSanitarioFinal" class="form-label">Número Corte Sanitario Final</label>
+                            <input type="text" class="form-control" id="numeroCorteSanitarioFinal" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="observaciones" class="form-label">Observaciones</label>
+                            <textarea class="form-control" id="observaciones" rows="3"></textarea>
+                        </div>
+                        <input type="hidden" id="ordenIdCierre">
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="button" class="btn btn-primary" id="guardarCierreBtn">Guardar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Modelo de datos para órdenes de fabricación
+        class OrdenFabricacion {
+            constructor(id, codigoOrden, codigoArticulo, producto, cantidadProducir, numeroCajas, botesPorCaja, numeroCorteSanitarioInicial, repercap) {
+                this.id = id;
+                this.codigoOrden = codigoOrden;
+                this.codigoArticulo = codigoArticulo;
+                this.producto = producto;
+                this.cantidadProducir = cantidadProducir;
+                this.numeroCajas = numeroCajas;
+                this.botesPorCaja = botesPorCaja || 0;
+                this.numeroCorteSanitarioInicial = numeroCorteSanitarioInicial;
+                this.repercap = repercap;
+                this.fechaCreacion = new Date().toISOString();
+                this.estado = 'creada'; // creada, activa, pausada, finalizada
+                this.unidadesPonderalTotal = 0;
+                this.cajasCompletadas = 0;
+                this.cierreFabricacion = null;
+            }
+        }
+
+        // Gestor de almacenamiento local
+        const StorageManager = {
+            getOrdenes() {
+                const ordenes = localStorage.getItem('ordenes');
+                return ordenes ? JSON.parse(ordenes) : [];
+            },
+            
+            saveOrdenes(ordenes) {
+                localStorage.setItem('ordenes', JSON.stringify(ordenes));
+            },
+            
+            addOrden(orden) {
+                const ordenes = this.getOrdenes();
+                ordenes.push(orden);
+                this.saveOrdenes(ordenes);
+            },
+            
+            updateOrden(ordenActualizada) {
+                const ordenes = this.getOrdenes();
+                const index = ordenes.findIndex(o => o.id === ordenActualizada.id);
+                if (index !== -1) {
+                    ordenes[index] = ordenActualizada;
+                    this.saveOrdenes(ordenes);
+                    return true;
+                }
+                return false;
+            },
+            
+            getOrdenById(id) {
+                const ordenes = this.getOrdenes();
+                return ordenes.find(o => o.id === id);
+            }
+        };
+
+        // Controlador de la UI
+        const UIController = {
+            ordenesContainer: document.getElementById('ordenesContainer'),
+            noOrdenesMsg: document.getElementById('noOrdenesMsg'),
+            ordenTemplate: document.getElementById('ordenTemplate'),
+            nuevaOrdenForm: document.getElementById('nuevaOrdenForm'),
+            refreshBtn: document.getElementById('refreshBtn'),
+            cierreFabricacionModal: new bootstrap.Modal(document.getElementById('cierreFabricacionModal')),
+            cierreFabricacionForm: document.getElementById('cierreFabricacionForm'),
+            ordenIdCierre: document.getElementById('ordenIdCierre'),
+            guardarCierreBtn: document.getElementById('guardarCierreBtn'),
+            
+            init() {
+                this.setupEventListeners();
+                this.renderOrdenes();
+            },
+            
+            setupEventListeners() {
+                // Evento para crear nueva orden
+                this.nuevaOrdenForm.addEventListener('submit', (e) => {
+                    e.preventDefault();
+                    this.crearNuevaOrden();
+                });
+                
+                // Evento para refrescar la lista de órdenes
+                this.refreshBtn.addEventListener('click', () => {
+                    this.renderOrdenes();
+                });
+                
+                // Evento para guardar cierre de fabricación
+                this.guardarCierreBtn.addEventListener('click', () => {
+                    this.guardarCierreFabricacion();
+                });
+                
+                // Delegación de eventos para las tarjetas de órdenes
+                this.ordenesContainer.addEventListener('click', (e) => {
+                    const ordenCard = e.target.closest('.card');
+                    if (!ordenCard) return;
+                    
+                    const ordenId = ordenCard.dataset.ordenId;
+                    
+                    // Botones de acción
+                    if (e.target.classList.contains('btn-iniciar')) {
+                        this.cambiarEstadoOrden(ordenId, 'activa');
+                    } else if (e.target.classList.contains('btn-pausar')) {
+                        this.cambiarEstadoOrden(ordenId, 'pausada');
+                    } else if (e.target.classList.contains('btn-finalizar')) {
+                        this.cambiarEstadoOrden(ordenId, 'finalizada');
+                    } else if (e.target.classList.contains('btn-cierre-fabricacion')) {
+                        this.abrirModalCierreFabricacion(ordenId);
+                    }
+                    
+                    // Botones de incremento/decremento
+                    if (e.target.classList.contains('increment-btn')) {
+                        const counterType = e.target.dataset.counter;
+                        this.incrementarContador(ordenId, counterType);
+                    } else if (e.target.classList.contains('decrement-btn')) {
+                        const counterType = e.target.dataset.counter;
+                        this.decrementarContador(ordenId, counterType);
+                    }
+                });
+            },
+            
+            crearNuevaOrden() {
+                const id = Date.now().toString();
+                const codigoOrden = document.getElementById('codigoOrden').value;
+                const codigoArticulo = document.getElementById('codigoArticulo').value;
+                const producto = document.getElementById('producto').value;
+                const cantidadProducir = parseInt(document.getElementById('cantidadProducir').value);
+                const numeroCajas = parseInt(document.getElementById('numeroCajas').value);
+                const botesPorCaja = parseInt(document.getElementById('botesPorCaja').value || 0);
+                const numeroCorteSanitarioInicial = document.getElementById('numeroCorteSanitarioInicial').value;
+                const repercap = document.getElementById('repercap').checked;
+                
+                const nuevaOrden = new OrdenFabricacion(
+                    id, codigoOrden, codigoArticulo, producto, cantidadProducir, 
+                    numeroCajas, botesPorCaja, numeroCorteSanitarioInicial, repercap
+                );
+                
+                StorageManager.addOrden(nuevaOrden);
+                this.nuevaOrdenForm.reset();
+                this.renderOrdenes();
+                
+                alert('Orden creada correctamente');
+            },
+            
+            renderOrdenes() {
+                const ordenes = StorageManager.getOrdenes();
+                
+                // Mostrar mensaje si no hay órdenes
+                if (ordenes.length === 0) {
+                    this.noOrdenesMsg.style.display = 'block';
+                    this.ordenesContainer.innerHTML = '';
+                    return;
+                }
+                
+                // Ocultar mensaje y mostrar órdenes
+                this.noOrdenesMsg.style.display = 'none';
+                this.ordenesContainer.innerHTML = '';
+                
+                // Renderizar cada orden
+                ordenes.forEach(orden => {
+                    const ordenElement = this.createOrdenElement(orden);
+                    this.ordenesContainer.appendChild(ordenElement);
+                });
+            },
+            
+            createOrdenElement(orden) {
+                const template = this.ordenTemplate.content.cloneNode(true);
+                const ordenCard = template.querySelector('.card');
+                
+                // Establecer ID de la orden
+                ordenCard.dataset.ordenId = orden.id;
+                
+                // Aplicar clase según estado
+                if (orden.estado === 'activa') {
+                    ordenCard.classList.add('active-order');
+                } else if (orden.estado === 'pausada') {
+                    ordenCard.classList.add('paused-order');
+                } else if (orden.estado === 'finalizada') {
+                    ordenCard.classList.add('completed-order');
+                }
+                
+                // Llenar datos básicos
+                template.querySelector('.orden-codigo').textContent = orden.codigoOrden;
+                template.querySelector('.orden-producto').textContent = orden.producto;
+                template.querySelector('.orden-codigo-articulo').textContent = orden.codigoArticulo;
+                template.querySelector('.orden-cantidad').textContent = orden.cantidadProducir;
+                template.querySelector('.orden-cajas').textContent = orden.numeroCajas;
+                template.querySelector('.orden-botes-caja').textContent = orden.botesPorCaja;
+                template.querySelector('.orden-corte-sanitario').textContent = orden.numeroCorteSanitarioInicial;
+                template.querySelector('.orden-repercap').textContent = orden.repercap ? 'Sí' : 'No';
+                
+                // Establecer contadores
+                template.querySelector('input[data-counter="unidadesPonderalTotal"]').value = orden.unidadesPonderalTotal;
+                template.querySelector('input[data-counter="cajasCompletadas"]').value = orden.cajasCompletadas;
+                
+                // Establecer fecha y estado
+                template.querySelector('.orden-fecha-creacion').textContent = new Date(orden.fechaCreacion).toLocaleString();
+                template.querySelector('.orden-estado').textContent = this.formatearEstado(orden.estado);
+                
+                // Configurar badge de estado
+                const badge = template.querySelector('.badge');
+                badge.textContent = this.formatearEstado(orden.estado);
+                
+                if (orden.estado === 'activa') {
+                    badge.classList.add('bg-success');
+                } else if (orden.estado === 'pausada') {
+                    badge.classList.add('bg-warning', 'text-dark');
+                } else if (orden.estado === 'finalizada') {
+                    badge.classList.add('bg-secondary');
+                } else {
+                    badge.classList.add('bg-primary');
+                }
+                
+                // Deshabilitar botones según estado
+                if (orden.estado === 'finalizada') {
+                    template.querySelectorAll('.btn').forEach(btn => {
+                        btn.disabled = true;
+                    });
+                    template.querySelectorAll('.counter-btn').forEach(btn => {
+                        btn.disabled = true;
+                    });
+                } else if (orden.estado === 'activa') {
+                    template.querySelector('.btn-iniciar').disabled = true;
+                } else if (orden.estado === 'pausada') {
+                    template.querySelector('.btn-pausar').disabled = true;
+                }
+                
+                // Mostrar información de cierre si existe
+                if (orden.cierreFabricacion) {
+                    const cierreInfo = document.createElement('div');
+                    cierreInfo.classList.add('mt-3', 'p-2', 'bg-light', 'rounded');
+                    cierreInfo.innerHTML = `
+                        <h6>Cierre de Fabricación:</h6>
+                        <p class="mb-1"><strong>Corte Sanitario Final:</strong> ${orden.cierreFabricacion.numeroCorteSanitarioFinal}</p>
+                        <p class="mb-0"><strong>Observaciones:</strong> ${orden.cierreFabricacion.observaciones || 'Ninguna'}</p>
+                    `;
+                    template.querySelector('.card-body').appendChild(cierreInfo);
+                    
+                    // Deshabilitar botón de cierre
+                    template.querySelector('.btn-cierre-fabricacion').disabled = true;
+                }
+                
+                return template;
+            },
+            
+            cambiarEstadoOrden(ordenId, nuevoEstado) {
+                const orden = StorageManager.getOrdenById(ordenId);
+                if (orden) {
+                    orden.estado = nuevoEstado;
+                    StorageManager.updateOrden(orden);
+                    this.renderOrdenes();
+                }
+            },
+            
+            incrementarContador(ordenId, counterType) {
+                const orden = StorageManager.getOrdenById(ordenId);
+                if (orden) {
+                    orden[counterType]++;
+                    StorageManager.updateOrden(orden);
+                    
+                    // Actualizar solo el valor del contador en la UI
+                    const ordenCard = this.ordenesContainer.querySelector(`.card[data-orden-id="${ordenId}"]`);
+                    if (ordenCard) {
+                        ordenCard.querySelector(`input[data-counter="${counterType}"]`).value = orden[counterType];
+                    }
+                }
+            },
+            
+            decrementarContador(ordenId, counterType) {
+                const orden = StorageManager.getOrdenById(ordenId);
+                if (orden && orden[counterType] > 0) {
+                    orden[counterType]--;
+                    StorageManager.updateOrden(orden);
+                    
+                    // Actualizar solo el valor del contador en la UI
+                    const ordenCard = this.ordenesContainer.querySelector(`.card[data-orden-id="${ordenId}"]`);
+                    if (ordenCard) {
+                        ordenCard.querySelector(`input[data-counter="${counterType}"]`).value = orden[counterType];
+                    }
+                }
+            },
+            
+            abrirModalCierreFabricacion(ordenId) {
+                this.ordenIdCierre.value = ordenId;
+                this.cierreFabricacionForm.reset();
+                this.cierreFabricacionModal.show();
+            },
+            
+            guardarCierreFabricacion() {
+                const ordenId = this.ordenIdCierre.value;
+                const numeroCorteSanitarioFinal = document.getElementById('numeroCorteSanitarioFinal').value;
+                const observaciones = document.getElementById('observaciones').value;
+                
+                const orden = StorageManager.getOrdenById(ordenId);
+                if (orden) {
+                    orden.cierreFabricacion = {
+                        numeroCorteSanitarioFinal,
+                        observaciones,
+                        fecha: new Date().toISOString()
+                    };
+                    
+                    // Finalizar la orden automáticamente
+                    orden.estado = 'finalizada';
+                    
+                    StorageManager.updateOrden(orden);
+                    this.cierreFabricacionModal.hide();
+                    this.renderOrdenes();
+                    
+                    alert('Cierre de fabricación registrado correctamente');
+                }
+            },
+            
+            formatearEstado(estado) {
+                const estados = {
+                    'creada': 'Creada',
+                    'activa': 'En Producción',
+                    'pausada': 'Pausada',
+                    'finalizada': 'Finalizada'
+                };
+                return estados[estado] || estado;
+            }
+        };
+
+        // Inicializar la aplicación cuando el DOM esté cargado
+        document.addEventListener('DOMContentLoaded', () => {
+            UIController.init();
+        });
+    </script>
+</body>
+</html>
