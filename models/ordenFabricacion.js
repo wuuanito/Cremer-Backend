@@ -92,15 +92,21 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
     }
   },
   
-  // Repercap
+  // Repercap - ACTUALIZADO: numeroCorteSanitario como INTEGER
   repercap: {
     type: DataTypes.BOOLEAN,
     allowNull: false,
     defaultValue: false
   },
   numeroCorteSanitarioInicial: {
-    type: DataTypes.STRING,
-    allowNull: true
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    validate: {
+      min: {
+        args: [0],
+        msg: 'El número de corte sanitario inicial no puede ser negativo'
+      }
+    }
   },
   
   // Tiempo estimado
@@ -159,7 +165,8 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
   unidadesRecuperadas: {
     type: DataTypes.INTEGER,
     allowNull: true,
-    defaultValue: 0
+    defaultValue: 0,
+    comment: 'Calculado automáticamente: unidadesPonderalTotal - botes buenos'
   },
   unidadesPonderalTotal: {
     type: DataTypes.INTEGER,
@@ -172,10 +179,24 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
     defaultValue: 0
   },
   
-  // Cortes sanitarios
+  // Cortes sanitarios - ACTUALIZADO: numeroCorteSanitarioFinal como INTEGER
   numeroCorteSanitarioFinal: {
-    type: DataTypes.STRING,
-    allowNull: true
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    validate: {
+      min: {
+        args: [0],
+        msg: 'El número de corte sanitario final no puede ser negativo'
+      }
+    }
+  },
+  
+  // NUEVO CAMPO: Recirculación Repercap
+  recirculacionRepercap: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: null,
+    comment: 'Calculado automáticamente: botes buenos * (numeroCorteSanitarioFinal - numeroCorteSanitarioInicial)'
   },
   
   // Métricas calculadas
@@ -225,7 +246,7 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
     type: DataTypes.FLOAT,
     allowNull: true,
     defaultValue: null,
-    comment: 'totalUnidades / tiempoTotalActivo (en horas)' // Actualizado
+    comment: 'totalUnidades / tiempoTotalActivo (en horas)'
   },
   standardRealVsTeorico: {
     type: DataTypes.FLOAT,
@@ -323,12 +344,28 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
       orden.standardRealVsTeorico = null;
       orden.tasaExpulsion = null;
       orden.tasaRecuperacionPonderal = null;
+      orden.recirculacionRepercap = null;
     },
     
     beforeSave: (orden, options) => {
       // Verificar si se está llamando desde el método finalizar con hooks: false
       if (options && options.hooks === false) {
         return; // No ejecutar los cálculos si hooks está desactivado
+      }
+      
+      // NUEVO: Calcular recirculación repercap
+      if (orden.botesBuenos && orden.numeroCorteSanitarioFinal !== null && orden.numeroCorteSanitarioInicial !== null) {
+        const diferenciaCorteSanitario = orden.numeroCorteSanitarioFinal - orden.numeroCorteSanitarioInicial;
+        orden.recirculacionRepercap = orden.botesBuenos * diferenciaCorteSanitario;
+      }
+      
+      // NUEVO: Calcular unidades recuperadas automáticamente
+      if (orden.unidadesPonderalTotal && orden.botesBuenos) {
+        orden.unidadesRecuperadas = orden.unidadesPonderalTotal - orden.botesBuenos;
+        // Asegurar que no sea negativo
+        if (orden.unidadesRecuperadas < 0) {
+          orden.unidadesRecuperadas = 0;
+        }
       }
       
       // Calcular total de unidades
@@ -347,7 +384,7 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
         
         if (orden.totalUnidades && tiempoActivoHoras > 0) {
           // Unidades totales (buenas + malas) por hora
-          orden.standardReal = orden.totalUnidades / tiempoActivoHoras; // Cambiado a totalUnidades
+          orden.standardReal = orden.totalUnidades / tiempoActivoHoras;
           
           // Estándar teórico (4000 unidades/hora)
           const standardTeorico = 4000;

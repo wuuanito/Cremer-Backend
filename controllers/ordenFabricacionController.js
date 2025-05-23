@@ -356,6 +356,10 @@ exports.simularTiempo = async (req, res) => {
 // Actualizar la sección de finalizar orden
 // Método finalizar en ordenFabricacionController.js
 
+// Modificación en el método finalizar del ordenFabricacionController.js
+// Agregar esta lógica antes de los cálculos de métricas
+
+// Método finalizar actualizado en ordenFabricacionController.js
 exports.finalizar = async (req, res) => {
   const transaction = await sequelize.transaction();
   
@@ -385,6 +389,21 @@ exports.finalizar = async (req, res) => {
       return res.status(400).json({ message: 'La orden ya está finalizada' });
     }
     
+    // NUEVA LÓGICA: Calcular botesBuenos automáticamente
+    let botesBuenosCalculados = ordenF.botesBuenos || 0;
+    
+    // Si existen botesPorCaja y cajasContadas, calcular automáticamente
+    if (ordenF.botesPorCaja && ordenF.botesPorCaja > 0 && ordenF.cajasContadas && ordenF.cajasContadas > 0) {
+      botesBuenosCalculados = ordenF.botesPorCaja * ordenF.cajasContadas;
+      
+      // Actualizar el campo botesBuenos en la orden
+      await ordenF.update({ 
+        botesBuenos: botesBuenosCalculados 
+      }, { transaction });
+      
+      console.log(`Botes buenos calculados automáticamente: ${ordenF.botesPorCaja} botes/caja * ${ordenF.cajasContadas} cajas = ${botesBuenosCalculados} botes`);
+    }
+    
     // Si la orden estaba pausada, cerrar la pausa activa
     if (ordenF.estado === 'pausada') {
       const pausaActiva = await Pausa.findOne({
@@ -397,8 +416,7 @@ exports.finalizar = async (req, res) => {
       
       if (pausaActiva) {
         const ahora = new Date();
-        // Calcular duración en minutos
-        const duracionPausa = Math.floor((ahora - pausaActiva.horaInicio) / (1000 * 60)); // en minutos
+        const duracionPausa = Math.floor((ahora - pausaActiva.horaInicio) / (1000 * 60));
         
         await pausaActiva.update({
           horaFin: ahora,
@@ -413,7 +431,6 @@ exports.finalizar = async (req, res) => {
       transaction
     });
     
-    // Sumar la duración de todas las pausas (en minutos)
     let tiempoPausadoTotalMinutos = 0;
     for (const pausa of pausas) {
       if (pausa.duracion !== null && pausa.duracion !== undefined) {
@@ -421,141 +438,110 @@ exports.finalizar = async (req, res) => {
       }
     }
     
-    console.log(`Tiempo pausado total (minutos): ${tiempoPausadoTotalMinutos}`);
-    
     // Calcular el tiempo activo total en minutos
     const ahora = new Date();
     let tiempoTotalMinutos = 0;
     
     if (ordenF.horaInicio) {
-      // Calcular en minutos
-      tiempoTotalMinutos = Math.floor((ahora - ordenF.horaInicio) / (1000 * 60)); // en minutos
-      // Asegurar un tiempo mínimo de 1 minuto
+      tiempoTotalMinutos = Math.floor((ahora - ordenF.horaInicio) / (1000 * 60));
       if (tiempoTotalMinutos < 1) tiempoTotalMinutos = 1;
     }
     
-    // Tiempo activo = tiempo total - tiempo pausado (en minutos)
     const tiempoActivoMinutos = tiempoTotalMinutos - tiempoPausadoTotalMinutos;
     
-    console.log(`Tiempo total (minutos): ${tiempoTotalMinutos}`);
-    console.log(`Tiempo activo (minutos): ${tiempoActivoMinutos}`);
-    
     // Estándar de referencia (unidades por hora)
-    const standardTeorico = 4000; // Unidades por hora
-    
-    // Standard teórico por minuto
-    const standardTeoricoMinuto = standardTeorico / 60; // Unidades por minuto
+    const standardTeorico = 4000;
+    const standardTeoricoMinuto = standardTeorico / 60;
     
     // Convertir todo a números para evitar errores de tipo
-    const unidadesCierreFinal = Number(unidadesCierreFin) || Number(ordenF.unidadesCierreFin) || 0;
+    const unidadesCierreFinal = Number(unidadesCierreFin) || Number(botesBuenosCalculados) || Number(ordenF.unidadesCierreFin) || 0;
     const unidadesNoOkFinal = Number(unidadesNoOkFin) || Number(ordenF.unidadesNoOkFin) || 0;
-    const unidadesExpulsadasFinal = Number(unidadesExpulsadas) || Number(ordenF.unidadesExpulsadas) || 0;
-    const unidadesRecuperadasFinal = Number(unidadesRecuperadas) || Number(ordenF.unidadesRecuperadas) || 0;
+    const unidadesExpulsadasFinal = Number(unidadesExpulsadas) || Number(ordenF.botesExpulsados) || Number(ordenF.unidadesExpulsadas) || 0;
     const unidadesPonderalTotalFinal = Number(unidadesPonderalTotal) || Number(ordenF.unidadesPonderalTotal) || 0;
+    
+    // NUEVA LÓGICA: Calcular unidadesRecuperadas automáticamente
+    let unidadesRecuperadasCalculadas = 0;
+    if (unidadesPonderalTotalFinal > 0 && botesBuenosCalculados > 0) {
+      unidadesRecuperadasCalculadas = unidadesPonderalTotalFinal - botesBuenosCalculados;
+      // Asegurar que no sea negativo
+      if (unidadesRecuperadasCalculadas < 0) {
+        unidadesRecuperadasCalculadas = 0;
+      }
+    }
+    
+    // NUEVA LÓGICA: Calcular recirculación repercap
+    let recirculacionRepercapCalculada = null;
+    if (botesBuenosCalculados > 0 && numeroCorteSanitarioFinal !== null && numeroCorteSanitarioFinal !== undefined && 
+        ordenF.numeroCorteSanitarioInicial !== null && ordenF.numeroCorteSanitarioInicial !== undefined) {
+      const corteFinal = Number(numeroCorteSanitarioFinal);
+      const corteInicial = Number(ordenF.numeroCorteSanitarioInicial);
+      const diferenciaCorteSanitario = corteFinal - corteInicial;
+      recirculacionRepercapCalculada = botesBuenosCalculados * diferenciaCorteSanitario;
+    }
     
     // Total de unidades producidas (buenas + malas)
     const totalUnidades = unidadesCierreFinal + unidadesNoOkFinal;
     
-    // 1. Tiempo estimado de producción (horas)
+    console.log(`DATOS PARA CÁLCULOS:`);
+    console.log(`- Botes buenos calculados: ${botesBuenosCalculados}`);
+    console.log(`- Unidades recuperadas calculadas: ${unidadesRecuperadasCalculadas}`);
+    console.log(`- Recirculación repercap calculada: ${recirculacionRepercapCalculada}`);
+    console.log(`- Unidades cierre final: ${unidadesCierreFinal}`);
+    console.log(`- Unidades NO OK final: ${unidadesNoOkFinal}`);
+    console.log(`- Total unidades: ${totalUnidades}`);
+    
+    // Cálculos de métricas (manteniendo la lógica existente)
     const tiempoEstimadoProduccion = ordenF.cantidadProducir / standardTeorico;
-    
-    // 2. Porcentaje de pausa vs total (0-100)
     const porcentajePausas = tiempoTotalMinutos > 0 ? (tiempoPausadoTotalMinutos / tiempoTotalMinutos) * 100 : 0;
-    
-    // 3. Porcentaje de unidades OK y NO OK (0-100)
     const porcentajeUnidadesOk = totalUnidades > 0 ? (unidadesCierreFinal / totalUnidades) * 100 : 0;
     const porcentajeUnidadesNoOk = totalUnidades > 0 ? (unidadesNoOkFinal / totalUnidades) * 100 : 0;
-    
-    // 4. Tasa de expulsión (0-100)
     const tasaExpulsion = totalUnidades > 0 ? (unidadesExpulsadasFinal / totalUnidades) * 100 : 0;
-    
-    // 5. Tasa de recuperación por ponderal (0-100)
-    const tasaRecuperacionPonderal = unidadesPonderalTotalFinal > 0 ? (unidadesRecuperadasFinal / unidadesPonderalTotalFinal) * 100 : 0;
-    
-    // 6. Tasa de recuperación Repercap (si aplica)
-    let tasaRecuperacionRepercap = null;
-    if (ordenF.repercap && numeroCorteSanitarioFinal && ordenF.numeroCorteSanitarioInicial) {
-      const corteInicial = parseInt(ordenF.numeroCorteSanitarioInicial, 10) || 0;
-      const corteFinal = parseInt(numeroCorteSanitarioFinal, 10) || 0;
-      if (corteInicial > 0) {
-        tasaRecuperacionRepercap = ((corteFinal - corteInicial) / corteInicial) * 100;
-      }
-    }
-    
-    // 7. Porcentaje de completado teórico (0-100)
+    const tasaRecuperacionPonderal = unidadesPonderalTotalFinal > 0 ? (unidadesRecuperadasCalculadas / unidadesPonderalTotalFinal) * 100 : 0;
     const porcentajeCompletado = ordenF.cantidadProducir > 0 ? (unidadesCierreFinal / ordenF.cantidadProducir) * 100 : 0;
     
-    console.log('Datos para cálculo de standard real:');
-    console.log(`unidadesCierreFinal: ${unidadesCierreFinal}`);
-    console.log(`tiempoActivoMinutos (minutos): ${tiempoActivoMinutos}`);
-    
-    // 8. Estándar real (unidades/hora)
-    // Fórmula: (unidades totales / tiempo activo en minutos) * 60 minutos/hora
+    // Estándar real (unidades/hora)
     let standardReal = 0;
     if (tiempoActivoMinutos > 0) {
-      // Calcular unidades totales por minuto
       const unidadesPorMinuto = totalUnidades / tiempoActivoMinutos;
-      // Convertir a unidades por hora
       standardReal = unidadesPorMinuto * 60;
     }
     
-    console.log(`Unidades por minuto: ${totalUnidades / tiempoActivoMinutos}`);
-    console.log(`Standard real (calculado): ${standardReal}`);
-    
-    // 9. Estándar vs estándar teórico (ratio como porcentaje 0-100)
     const standardRealVsTeorico = standardTeorico > 0 ? (standardReal / standardTeorico) * 100 : 0;
-    
-    // 10. Disponibilidad (como decimal 0-1)
     const disponibilidad = tiempoTotalMinutos > 0 ? tiempoActivoMinutos / tiempoTotalMinutos : 0;
     
-    console.log('Datos para cálculo de rendimiento:');
-    console.log(`totalUnidades (OK + NO OK): ${totalUnidades}`);
-    console.log(`tiempoActivoMinutos (minutos): ${tiempoActivoMinutos}`);
-    console.log(`standardTeoricoMinuto: ${standardTeoricoMinuto}`);
-    
-    // 11. Rendimiento (como decimal 0-1)
-    // Fórmula: Total unidades (buenas + malas) / (tiempo activo en minutos * standard por minuto)
+    // Rendimiento (como decimal 0-1)
     let rendimiento = 0;
     if (tiempoActivoMinutos > 0) {
       const unidadesTeoricas = tiempoActivoMinutos * standardTeoricoMinuto;
-      // Usar totalUnidades (que incluye buenas + malas) para el rendimiento
       rendimiento = unidadesTeoricas > 0 ? totalUnidades / unidadesTeoricas : 0;
     }
     
-    console.log(`Unidades teóricas: ${tiempoActivoMinutos * standardTeoricoMinuto}`);
-    console.log(`Rendimiento (calculado): ${rendimiento} (${rendimiento * 100}%)`);
-    
-    // 12. Calidad (como decimal 0-1)
     const calidad = totalUnidades > 0 ? unidadesCierreFinal / totalUnidades : 0;
-    
-    // 13. OEE (como decimal 0-1)
     const oee = disponibilidad * rendimiento * calidad;
     
-    // Para depuración, convertir a porcentajes para los logs
-    console.log(`Disponibilidad: ${(disponibilidad * 100).toFixed(2)}%`);
-    console.log(`Rendimiento: ${(rendimiento * 100).toFixed(2)}%`);
-    console.log(`Calidad: ${(calidad * 100).toFixed(2)}%`);
-    console.log(`OEE: ${(oee * 100).toFixed(2)}%`);
-    
-    // Redondear todos los valores a 6 decimales para mayor precisión
+    // Preparar datos de actualización con los nuevos campos calculados
     const datosActualizacion = {
       estado: 'finalizada',
       horaFin: ahora,
       tiempoTotal: Number(tiempoTotalMinutos),
       tiempoTotalActivo: Number(tiempoActivoMinutos),
-      tiempoTotalPausas: Number(tiempoPausadoTotalMinutos), // En MINUTOS
+      tiempoTotalPausas: Number(tiempoPausadoTotalMinutos),
       tiempoEstimadoProduccion: Number(tiempoEstimadoProduccion.toFixed(6)),
+      
+      // Valores calculados automáticamente
+      botesBuenos: Number(botesBuenosCalculados),
+      unidadesRecuperadas: Number(unidadesRecuperadasCalculadas),
+      recirculacionRepercap: recirculacionRepercapCalculada,
       
       // Datos de cierre
       unidadesCierreFin: Number(unidadesCierreFinal),
       unidadesNoOkFin: Number(unidadesNoOkFinal),
-      numeroCorteSanitarioFinal: numeroCorteSanitarioFinal || ordenF.numeroCorteSanitarioFinal,
+      numeroCorteSanitarioFinal: numeroCorteSanitarioFinal ? Number(numeroCorteSanitarioFinal) : ordenF.numeroCorteSanitarioFinal,
       
       // Total de unidades
       totalUnidades: Number(totalUnidades),
       
       // Unidades especiales
-      unidadesRecuperadas: Number(unidadesRecuperadasFinal),
       unidadesPonderalTotal: Number(unidadesPonderalTotalFinal),
       unidadesExpulsadas: Number(unidadesExpulsadasFinal),
       
@@ -568,13 +554,12 @@ exports.finalizar = async (req, res) => {
       // Tasas (siguen como 0-100)
       tasaExpulsion: Number(tasaExpulsion.toFixed(6)),
       tasaRecuperacionPonderal: Number(tasaRecuperacionPonderal.toFixed(6)),
-      tasaRecuperacionRepercap: tasaRecuperacionRepercap ? Number(tasaRecuperacionRepercap.toFixed(6)) : null,
       
       // Estándares
       standardReal: Number(standardReal.toFixed(6)),
       standardRealVsTeorico: Number(standardRealVsTeorico.toFixed(6)),
       
-      // Métricas OEE (ahora como decimales 0-1)
+      // Métricas OEE (como decimales 0-1)
       disponibilidad: Number(disponibilidad.toFixed(6)),
       rendimiento: Number(rendimiento.toFixed(6)),
       calidad: Number(calidad.toFixed(6)),
@@ -583,11 +568,14 @@ exports.finalizar = async (req, res) => {
     
     // Para depuración extensiva
     console.log('RESULTADOS FINALES:');
+    console.log(`botesBuenos final: ${botesBuenosCalculados}`);
+    console.log(`unidadesRecuperadas final: ${unidadesRecuperadasCalculadas}`);
+    console.log(`recirculacionRepercap final: ${recirculacionRepercapCalculada}`);
     console.log(`tiempoTotal (minutos): ${tiempoTotalMinutos}`);
     console.log(`tiempoActivo (minutos): ${tiempoActivoMinutos}`);
     console.log(`tiempoPausadoTotal (minutos): ${tiempoPausadoTotalMinutos}`);
     console.log(`standardReal: ${standardReal.toFixed(2)} unidades/hora`);
-    console.log(`standardRealVsTeorico: ${standardRealVsTeorico.toFixed(2)}%`);
+    console.log(`OEE: ${(oee * 100).toFixed(2)}%`);
     
     // Actualizar y finalizar la orden DESHABILITANDO LOS HOOKS
     console.log('Actualizando orden con datos calculados');
@@ -599,36 +587,46 @@ exports.finalizar = async (req, res) => {
     await transaction.commit();
     
     // Obtener la orden actualizada con todos los cálculos automáticos
-    const ordenActualizada = await OrdenFabricacion.findByPk(id, { 
-      include: ['pausas'],
-      transaction: null 
-    });
-    
-    // Verificar los valores guardados
-    console.log('VALORES GUARDADOS:');
-    console.log(`tiempoPausadoTotal guardado (minutos): ${ordenActualizada.tiempoTotalPausas}`);
-    console.log(`standardReal guardado: ${ordenActualizada.standardReal}`);
-    console.log(`disponibilidad guardado: ${ordenActualizada.disponibilidad} (${ordenActualizada.disponibilidad * 100}%)`);
-    console.log(`rendimiento guardado: ${ordenActualizada.rendimiento} (${ordenActualizada.rendimiento * 100}%)`);
-    console.log(`calidad guardado: ${ordenActualizada.calidad} (${ordenActualizada.calidad * 100}%)`);
-    console.log(`oee guardado: ${ordenActualizada.oee} (${ordenActualizada.oee * 100}%)`);
-    
-    // Notificar a través de socket.io
-    const io = req.app.get('io');
-    io.emit('ordenFabricacion:updated', ordenActualizada);
-    
-    return res.status(200).json({ 
-      message: 'Orden de fabricación finalizada correctamente',
-      orden: ordenActualizada
-    });
-  } catch (error) {
-    await transaction.rollback();
-    console.error('Error al finalizar orden de fabricación:', error);
-    return res.status(500).json({ 
-      message: 'Error al finalizar orden de fabricación',
-      error: error.message 
-    });
-  }
+   const ordenActualizada = await OrdenFabricacion.findByPk(id, { 
+     include: ['pausas'],
+     transaction: null 
+   });
+   
+   // Verificar los valores guardados
+   console.log('VALORES GUARDADOS:');
+   console.log(`botesBuenos guardado: ${ordenActualizada.botesBuenos}`);
+   console.log(`unidadesRecuperadas guardado: ${ordenActualizada.unidadesRecuperadas}`);
+   console.log(`recirculacionRepercap guardado: ${ordenActualizada.recirculacionRepercap}`);
+   console.log(`tiempoPausadoTotal guardado (minutos): ${ordenActualizada.tiempoTotalPausas}`);
+   console.log(`standardReal guardado: ${ordenActualizada.standardReal}`);
+   console.log(`disponibilidad guardado: ${ordenActualizada.disponibilidad} (${ordenActualizada.disponibilidad * 100}%)`);
+   console.log(`rendimiento guardado: ${ordenActualizada.rendimiento} (${ordenActualizada.rendimiento * 100}%)`);
+   console.log(`calidad guardado: ${ordenActualizada.calidad} (${ordenActualizada.calidad * 100}%)`);
+   console.log(`oee guardado: ${ordenActualizada.oee} (${ordenActualizada.oee * 100}%)`);
+   
+   // Notificar a través de socket.io
+   const io = req.app.get('io');
+   io.emit('ordenFabricacion:updated', ordenActualizada);
+   
+   return res.status(200).json({ 
+     message: 'Orden de fabricación finalizada correctamente',
+     orden: ordenActualizada,
+     calculoAutomatico: {
+       botesPorCaja: ordenF.botesPorCaja,
+       cajasContadas: ordenF.cajasContadas,
+       botesBuenosCalculados: botesBuenosCalculados,
+       unidadesRecuperadasCalculadas: unidadesRecuperadasCalculadas,
+       recirculacionRepercapCalculada: recirculacionRepercapCalculada
+     }
+   });
+ } catch (error) {
+   await transaction.rollback();
+   console.error('Error al finalizar orden de fabricación:', error);
+   return res.status(500).json({ 
+     message: 'Error al finalizar orden de fabricación',
+     error: error.message 
+   });
+ }
 };
   
   // Agregar los nuevos métodos para gestionar botesOperario
