@@ -3,6 +3,8 @@ const cors = require('cors');
 const http = require('http');
 const socketIO = require('socket.io');
 const dotenv = require('dotenv');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 // Cargar variables de entorno
 dotenv.config();
@@ -307,3 +309,15 @@ process.on('unhandledRejection', (reason, promise) => {
 iniciarServidor();
 
 module.exports = { app, server, io };
+
+// Middleware de configuración
+app.use(helmet());
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 1000, // Límite de 1000 peticiones por IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    message: 'Demasiadas peticiones desde esta IP, por favor intente más tarde.'
+  }
+}));
