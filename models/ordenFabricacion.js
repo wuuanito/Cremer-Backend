@@ -82,8 +82,8 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
   },
   botesPorCaja: {
     type: DataTypes.INTEGER,
-    allowNull: false,
-    defaultValue: 0,
+    allowNull: true, // CAMBIADO: ahora permite null
+    defaultValue: null, // CAMBIADO: valor por defecto null
     validate: {
       min: {
         args: [0],
@@ -92,7 +92,7 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
     }
   },
   
-  // Repercap - ACTUALIZADO: numeroCorteSanitario como INTEGER
+  // Repercap - CORREGIDO: manejo de null values
   repercap: {
     type: DataTypes.BOOLEAN,
     allowNull: false,
@@ -101,6 +101,7 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
   numeroCorteSanitarioInicial: {
     type: DataTypes.INTEGER,
     allowNull: true,
+    defaultValue: null, // EXPLÍCITO: valor por defecto null
     validate: {
       min: {
         args: [0],
@@ -179,10 +180,11 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
     defaultValue: 0
   },
   
-  // Cortes sanitarios - ACTUALIZADO: numeroCorteSanitarioFinal como INTEGER
+  // Cortes sanitarios
   numeroCorteSanitarioFinal: {
     type: DataTypes.INTEGER,
     allowNull: true,
+    defaultValue: null, // EXPLÍCITO: valor por defecto null
     validate: {
       min: {
         args: [0],
@@ -191,7 +193,7 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
     }
   },
   
-  // NUEVO CAMPO: Recirculación Repercap
+  // Recirculación Repercap
   recirculacionRepercap: {
     type: DataTypes.INTEGER,
     allowNull: true,
@@ -234,11 +236,11 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
     defaultValue: null,
     comment: '(unidadesRecuperadas / unidadesPonderalTotal) * 100'
   },
-  tasaRecuperacionRepercap: {
-    type: DataTypes.FLOAT,
-    allowNull: true,
-    defaultValue: null,
-    comment: 'Cálculo específico de recuperación por Repercap'
+ tasaRecuperacionPonderal: {
+    type: DataTypes.DECIMAL(10, 6),
+    defaultValue: 0,
+    allowNull: false,
+    comment: 'Tasa recuperación ponderal = recirculacionPonderal / (unidadesCierreFin + unidadesNoOkFin) * 100'
   },
   
   // Estándares
@@ -289,6 +291,17 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
     defaultValue: 'creada',
     allowNull: false
   },
+   botesPonderal: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
+    allowNull: false,
+    comment: 'Contador de botes ponderal (activado por PIN 23)'
+  },  recirculacionPonderal: {
+    type: DataTypes.DECIMAL(10, 6),
+    defaultValue: 0,
+    allowNull: false,
+    comment: 'Recirculación ponderal = unidadesPonderalTotal - (unidadesCierreFin + unidadesNoOkFin)'
+  },
   
   // Campos adicionales para seguimiento
   botesOperario: {
@@ -326,114 +339,150 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
   
   hooks: {
     beforeCreate: (orden, options) => {
-      // Calcular tiempo estimado de producción
-      if (orden.cantidadProducir && !orden.tiempoEstimadoProduccion) {
-        orden.tiempoEstimadoProduccion = orden.cantidadProducir / 4000;
+      try {
+        console.log('Hook beforeCreate ejecutándose...');
+        console.log('Datos de orden:', JSON.stringify(orden.dataValues, null, 2));
+        
+        // Calcular tiempo estimado de producción
+        if (orden.cantidadProducir && !orden.tiempoEstimadoProduccion) {
+          orden.tiempoEstimadoProduccion = orden.cantidadProducir / 4000;
+        }
+        
+        // CORREGIDO: Manejo seguro de campos null/undefined
+        // Solo establecer valores si no están definidos o son null
+        if (orden.botesPorCaja === undefined) {
+          orden.botesPorCaja = null;
+        }
+        
+        if (orden.numeroCorteSanitarioInicial === undefined) {
+          orden.numeroCorteSanitarioInicial = null;
+        }
+        
+        if (orden.numeroCorteSanitarioFinal === undefined) {
+          orden.numeroCorteSanitarioFinal = null;
+        }
+        
+        // Restablecer campos calculados a null (no undefined)
+        orden.oee = null;
+        orden.disponibilidad = null;
+        orden.rendimiento = null;
+        orden.calidad = null;
+        orden.porcentajeUnidadesOk = null;
+        orden.porcentajeUnidadesNoOk = null;
+        orden.porcentajePausas = null;
+        orden.porcentajeCompletado = null;
+        orden.standardReal = null;
+        orden.standardRealVsTeorico = null;
+        orden.tasaExpulsion = null;
+        orden.tasaRecuperacionPonderal = null;
+        orden.recirculacionRepercap = null;
+        orden.unidadesRecuperadas = null;
+        
+        console.log('Hook beforeCreate completado exitosamente');
+      } catch (error) {
+        console.error('Error en hook beforeCreate:', error);
+        throw error; // Re-lanzar el error para que Sequelize lo maneje
       }
-      
-      // Restablecer campos calculados
-      orden.oee = null;
-      orden.disponibilidad = null;
-      orden.rendimiento = null;
-      orden.calidad = null;
-      orden.porcentajeUnidadesOk = null;
-      orden.porcentajeUnidadesNoOk = null;
-      orden.porcentajePausas = null;
-      orden.porcentajeCompletado = null;
-      orden.standardReal = null;
-      orden.standardRealVsTeorico = null;
-      orden.tasaExpulsion = null;
-      orden.tasaRecuperacionPonderal = null;
-      orden.recirculacionRepercap = null;
     },
     
     beforeSave: (orden, options) => {
-      // Verificar si se está llamando desde el método finalizar con hooks: false
-      if (options && options.hooks === false) {
-        return; // No ejecutar los cálculos si hooks está desactivado
-      }
-      
-      // NUEVO: Calcular recirculación repercap
-      if (orden.botesBuenos && orden.numeroCorteSanitarioFinal !== null && orden.numeroCorteSanitarioInicial !== null) {
-        const diferenciaCorteSanitario = orden.numeroCorteSanitarioFinal - orden.numeroCorteSanitarioInicial;
-        orden.recirculacionRepercap = orden.botesBuenos * diferenciaCorteSanitario;
-      }
-      
-      // NUEVO: Calcular unidades recuperadas automáticamente
-      if (orden.unidadesPonderalTotal && orden.botesBuenos) {
-        orden.unidadesRecuperadas = orden.unidadesPonderalTotal - orden.botesBuenos;
-        // Asegurar que no sea negativo
-        if (orden.unidadesRecuperadas < 0) {
-          orden.unidadesRecuperadas = 0;
+      try {
+        console.log('Hook beforeSave ejecutándose...');
+        
+        // Verificar si se está llamando desde el método finalizar con hooks: false
+        if (options && options.hooks === false) {
+          console.log('Hooks desactivados, saltando cálculos automáticos');
+          return;
         }
-      }
-      
-      // Calcular total de unidades
-      if (orden.unidadesCierreFin !== null && orden.unidadesNoOkFin !== null) {
-        orden.totalUnidades = orden.unidadesCierreFin + orden.unidadesNoOkFin;
-      }
-      
-      // Cálculos de métricas solo si hay datos suficientes
-      if (orden.tiempoTotal && orden.tiempoTotalActivo) {
-        // Disponibilidad (como decimal 0-1)
-        orden.disponibilidad = orden.tiempoTotalActivo / orden.tiempoTotal;
         
-        // Standard real (unidades por hora)
-        // Convertir minutos a horas para el cálculo
-        const tiempoActivoHoras = orden.tiempoTotalActivo / 60; // Convertir minutos a horas
+        // NUEVO: Calcular recirculación repercap - CON VALIDACIÓN NULL
+        if (orden.botesBuenos && 
+            orden.numeroCorteSanitarioFinal !== null && orden.numeroCorteSanitarioFinal !== undefined &&
+            orden.numeroCorteSanitarioInicial !== null && orden.numeroCorteSanitarioInicial !== undefined) {
+          const diferenciaCorteSanitario = orden.numeroCorteSanitarioFinal - orden.numeroCorteSanitarioInicial;
+          orden.recirculacionRepercap = orden.botesBuenos * diferenciaCorteSanitario;
+          console.log(`Recirculación Repercap calculada: ${orden.recirculacionRepercap}`);
+        }
         
-        if (orden.totalUnidades && tiempoActivoHoras > 0) {
-          // Unidades totales (buenas + malas) por hora
-          orden.standardReal = orden.totalUnidades / tiempoActivoHoras;
+        // NUEVO: Calcular unidades recuperadas automáticamente - CON VALIDACIÓN NULL
+        if (orden.unidadesPonderalTotal && orden.botesBuenos) {
+          orden.unidadesRecuperadas = orden.unidadesPonderalTotal - orden.botesBuenos;
+          // Asegurar que no sea negativo
+          if (orden.unidadesRecuperadas < 0) {
+            orden.unidadesRecuperadas = 0;
+          }
+          console.log(`Unidades recuperadas calculadas: ${orden.unidadesRecuperadas}`);
+        }
+        
+        // Calcular total de unidades - CON VALIDACIÓN NULL
+        if (orden.unidadesCierreFin !== null && orden.unidadesCierreFin !== undefined &&
+            orden.unidadesNoOkFin !== null && orden.unidadesNoOkFin !== undefined) {
+          orden.totalUnidades = orden.unidadesCierreFin + orden.unidadesNoOkFin;
+          console.log(`Total unidades calculado: ${orden.totalUnidades}`);
+        }
+        
+        // Continuar con los cálculos de métricas solo si hay datos suficientes
+        if (orden.tiempoTotal && orden.tiempoTotalActivo && orden.tiempoTotal > 0 && orden.tiempoTotalActivo > 0) {
+          console.log('Calculando métricas de rendimiento...');
           
-          // Estándar teórico (4000 unidades/hora)
-          const standardTeorico = 4000;
+          // Disponibilidad (como decimal 0-1)
+          orden.disponibilidad = orden.tiempoTotalActivo / orden.tiempoTotal;
           
-          // Standard vs teórico (%)
-          orden.standardRealVsTeorico = (orden.standardReal / standardTeorico) * 100;
+          // Standard real (unidades por hora)
+          const tiempoActivoHoras = orden.tiempoTotalActivo / 60;
           
-          // Rendimiento (como decimal 0-1)
-          // Unidades teóricas = tiempo activo en minutos * (standardTeorico / 60)
-          const unidadesTeoricas = orden.tiempoTotalActivo * (standardTeorico / 60);
-          // Usar totalUnidades (buenas + malas) para el rendimiento
-          orden.rendimiento = unidadesTeoricas > 0 ? orden.totalUnidades / unidadesTeoricas : 0;
+          if (orden.totalUnidades && tiempoActivoHoras > 0) {
+            orden.standardReal = orden.totalUnidades / tiempoActivoHoras;
+            
+            const standardTeorico = 4000;
+            orden.standardRealVsTeorico = (orden.standardReal / standardTeorico) * 100;
+            
+            // Rendimiento (como decimal 0-1)
+            const unidadesTeoricas = orden.tiempoTotalActivo * (standardTeorico / 60);
+            orden.rendimiento = unidadesTeoricas > 0 ? orden.totalUnidades / unidadesTeoricas : 0;
+          }
+          
+          // Calidad (como decimal 0-1)
+          if (orden.totalUnidades && orden.unidadesCierreFin && orden.totalUnidades > 0) {
+            orden.calidad = orden.unidadesCierreFin / orden.totalUnidades;
+          }
+          
+          // OEE (como decimal 0-1)
+          if (orden.disponibilidad !== null && orden.rendimiento !== null && orden.calidad !== null) {
+            orden.oee = orden.disponibilidad * orden.rendimiento * orden.calidad;
+          }
+          
+          // Porcentajes (como 0-100)
+          if (orden.totalUnidades && orden.totalUnidades > 0) {
+            orden.porcentajeUnidadesOk = (orden.unidadesCierreFin / orden.totalUnidades) * 100;
+            orden.porcentajeUnidadesNoOk = (orden.unidadesNoOkFin / orden.totalUnidades) * 100;
+          }
+          
+          // Porcentaje de completado
+          if (orden.cantidadProducir && orden.cantidadProducir > 0) {
+            orden.porcentajeCompletado = (orden.unidadesCierreFin / orden.cantidadProducir) * 100;
+          }
+          
+          // Porcentaje de pausas
+          if (orden.tiempoTotal > 0) {
+            orden.porcentajePausas = (orden.tiempoTotalPausas / orden.tiempoTotal) * 100;
+          }
+          
+          // Tasa de expulsión
+          if (orden.totalUnidades && orden.totalUnidades > 0) {
+            orden.tasaExpulsion = (orden.unidadesExpulsadas / orden.totalUnidades) * 100;
+          }
+          
+          // Tasa de recuperación ponderal
+          if (orden.unidadesPonderalTotal && orden.unidadesPonderalTotal > 0) {
+            orden.tasaRecuperacionPonderal = (orden.unidadesRecuperadas / orden.unidadesPonderalTotal) * 100;
+          }
         }
         
-        // Calidad (como decimal 0-1)
-        if (orden.totalUnidades && orden.unidadesCierreFin) {
-          orden.calidad = orden.unidadesCierreFin / orden.totalUnidades;
-        }
-        
-        // OEE (como decimal 0-1)
-        if (orden.disponibilidad !== null && orden.rendimiento !== null && orden.calidad !== null) {
-          orden.oee = orden.disponibilidad * orden.rendimiento * orden.calidad;
-        }
-        
-        // Porcentajes de unidades (éstos siguen como porcentajes 0-100)
-        if (orden.totalUnidades) {
-          orden.porcentajeUnidadesOk = (orden.unidadesCierreFin / orden.totalUnidades) * 100;
-          orden.porcentajeUnidadesNoOk = (orden.unidadesNoOkFin / orden.totalUnidades) * 100;
-        }
-        
-        // Porcentaje de completado (sigue como porcentaje 0-100)
-        if (orden.cantidadProducir) {
-          orden.porcentajeCompletado = (orden.unidadesCierreFin / orden.cantidadProducir) * 100;
-        }
-        
-        // Porcentaje de pausas (sigue como porcentaje 0-100)
-        if (orden.tiempoTotal) {
-          orden.porcentajePausas = (orden.tiempoTotalPausas / orden.tiempoTotal) * 100;
-        }
-        
-        // Tasa de expulsión (sigue como porcentaje 0-100)
-        if (orden.totalUnidades) {
-          orden.tasaExpulsion = (orden.unidadesExpulsadas / orden.totalUnidades) * 100;
-        }
-        
-        // Tasa de recuperación ponderal (sigue como porcentaje 0-100)
-        if (orden.unidadesPonderalTotal) {
-          orden.tasaRecuperacionPonderal = (orden.unidadesRecuperadas / orden.unidadesPonderalTotal) * 100;
-        }
+        console.log('Hook beforeSave completado exitosamente');
+      } catch (error) {
+        console.error('Error en hook beforeSave:', error);
+        throw error;
       }
     }
   }

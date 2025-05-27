@@ -44,46 +44,158 @@ exports.getById = async (req, res) => {
 };
 
 // Crear una nueva orden de fabricación
+// Crear una nueva orden de fabricación - VERSIÓN CORREGIDA
 exports.create = async (req, res) => {
   const transaction = await sequelize.transaction();
   
   try {
-    // Preparar datos de entrada
+    console.log('=== INICIO CREACIÓN ORDEN ===');
+    console.log('Datos recibidos:', JSON.stringify(req.body, null, 2));
+    
+    // Validar campos obligatorios
+    const camposObligatorios = ['codigoOrden', 'codigoArticulo', 'producto', 'cantidadProducir', 'numeroCajas'];
+    const camposFaltantes = camposObligatorios.filter(campo => !req.body[campo]);
+    
+    if (camposFaltantes.length > 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        message: 'Faltan campos obligatorios',
+        camposFaltantes
+      });
+    }
+    
+    // Preparar datos de entrada con manejo seguro de null/undefined
     const datosOrden = {
-      codigoOrden: req.body.codigoOrden,
-      codigoArticulo: req.body.codigoArticulo,
-      producto: req.body.producto,
-      cantidadProducir: req.body.cantidadProducir,
-      numeroCajas: req.body.numeroCajas,
-      repercap: req.body.repercap || false,
-      numeroCorteSanitarioInicial: req.body.numeroCorteSanitarioInicial,
+      codigoOrden: req.body.codigoOrden.trim(),
+      codigoArticulo: req.body.codigoArticulo.trim(),
+      producto: req.body.producto.trim(),
+      cantidadProducir: parseInt(req.body.cantidadProducir),
+      numeroCajas: parseInt(req.body.numeroCajas),
+      
+      // Campo repercap (siempre boolean)
+      repercap: Boolean(req.body.repercap),
+      
+      // Campos opcionales - MANEJO CORRECTO DE NULL
+      botesPorCaja: req.body.botesPorCaja ? parseInt(req.body.botesPorCaja) : null,
+      numeroCorteSanitarioInicial: req.body.numeroCorteSanitarioInicial ? parseInt(req.body.numeroCorteSanitarioInicial) : null,
       
       // Campos calculados automáticamente
-      tiempoEstimadoProduccion: req.body.cantidadProducir / 2000, // Estándar teórico
+      tiempoEstimadoProduccion: parseInt(req.body.cantidadProducir) / 2000, // Estándar teórico
       estado: 'creada'
     };
     
-    // Campos opcionales
-    if (req.body.botesPorCaja) {
-      datosOrden.botesPorCaja = req.body.botesPorCaja;
+    console.log('Datos preparados para creación:', JSON.stringify(datosOrden, null, 2));
+    
+    // Validaciones específicas
+    if (datosOrden.cantidadProducir <= 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        message: 'La cantidad a producir debe ser mayor a 0'
+      });
     }
     
+    if (datosOrden.numeroCajas < 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        message: 'El número de cajas no puede ser negativo'
+      });
+    }
+    
+    // Validación específica para repercap
+    if (datosOrden.repercap && !datosOrden.numeroCorteSanitarioInicial) {
+      await transaction.rollback();
+      return res.status(400).json({
+        message: 'El número de corte sanitario inicial es obligatorio cuando repercap está activado'
+      });
+    }
+    
+    // Validación de botes por caja
+    if (datosOrden.botesPorCaja !== null && datosOrden.botesPorCaja < 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        message: 'Los botes por caja no pueden ser negativos'
+      });
+    }
+    
+    console.log('Validaciones pasadas, creando orden...');
+    
     // Crear la orden
-    const ordenF = await OrdenFabricacion.create(datosOrden, { transaction });
+    const ordenF = await OrdenFabricacion.create(datosOrden, { 
+      transaction,
+      returning: true // Asegurar que devuelva el registro creado
+    });
+    
+    console.log('Orden creada exitosamente:', ordenF.id);
     
     await transaction.commit();
     
-    // Notificar a través de socket.io
-    const io = req.app.get('io');
-    io.emit('ordenFabricacion:created', ordenF);
+    // Obtener la orden completa con todas las relaciones
+    const ordenCompleta = await OrdenFabricacion.findByPk(ordenF.id, {
+      include: ['pausas']
+    });
     
-    return res.status(201).json(ordenF);
+    console.log('=== ORDEN CREADA EXITOSAMENTE ===');
+    console.log('ID:', ordenCompleta.id);
+    console.log('Código:', ordenCompleta.codigoOrden);
+    console.log('Repercap:', ordenCompleta.repercap);
+    console.log('Corte sanitario inicial:', ordenCompleta.numeroCorteSanitarioInicial);
+    
+    // Notificar a través de socket.io
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('ordenFabricacion:created', ordenCompleta);
+        console.log('Notificación socket.io enviada');
+      }
+    } catch (socketError) {
+      console.error('Error al enviar notificación socket.io:', socketError);
+      // No afecta la creación, solo registrar el error
+    }
+    
+    return res.status(201).json({
+      message: 'Orden de fabricación creada exitosamente',
+      orden: ordenCompleta
+    });
+    
   } catch (error) {
     await transaction.rollback();
-    console.error('Error al crear orden de fabricación:', error);
-    return res.status(500).json({ 
-      message: 'Error al crear orden de fabricación',
-      error: error.message 
+    console.error('=== ERROR EN CREACIÓN DE ORDEN ===');
+    console.error('Tipo de error:', error.name);
+    console.error('Mensaje:', error.message);
+    console.error('Stack:', error.stack);
+    
+    // Manejo específico de errores de Sequelize
+    if (error.name === 'SequelizeValidationError') {
+      const erroresValidacion = error.errors.map(err => ({
+        campo: err.path,
+        mensaje: err.message,
+        valor: err.value
+      }));
+      
+      return res.status(400).json({
+        message: 'Error de validación en los datos',
+        errores: erroresValidacion
+      });
+    }
+    
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(409).json({
+        message: 'Ya existe una orden con ese código',
+        codigo: req.body.codigoOrden
+      });
+    }
+    
+    if (error.name === 'SequelizeDatabaseError') {
+      console.error('Error de base de datos:', error.original);
+      return res.status(500).json({
+        message: 'Error de base de datos',
+        detalle: process.env.NODE_ENV === 'development' ? error.original.message : 'Error interno'
+      });
+    }
+    
+    return res.status(500).json({
+      message: 'Error interno del servidor al crear orden de fabricación',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Error interno'
     });
   }
 };
@@ -351,15 +463,8 @@ exports.simularTiempo = async (req, res) => {
     });
   }
 };
-// Actualizar la sección de finalizar orden
-// Actualizar la sección de finalizar orden
-// Actualizar la sección de finalizar orden
-// Método finalizar en ordenFabricacionController.js
 
-// Modificación en el método finalizar del ordenFabricacionController.js
-// Agregar esta lógica antes de los cálculos de métricas
-
-// Método finalizar actualizado en ordenFabricacionController.js
+// Método finalizar corregido
 exports.finalizar = async (req, res) => {
   const transaction = await sequelize.transaction();
   
@@ -459,6 +564,9 @@ exports.finalizar = async (req, res) => {
     const unidadesExpulsadasFinal = Number(unidadesExpulsadas) || Number(ordenF.botesExpulsados) || Number(ordenF.unidadesExpulsadas) || 0;
     const unidadesPonderalTotalFinal = Number(unidadesPonderalTotal) || Number(ordenF.unidadesPonderalTotal) || 0;
     
+    // Total de unidades producidas (buenas + malas)
+    const totalUnidades = unidadesCierreFinal + unidadesNoOkFinal;
+    
     // NUEVA LÓGICA: Calcular unidadesRecuperadas automáticamente
     let unidadesRecuperadasCalculadas = 0;
     if (unidadesPonderalTotalFinal > 0 && botesBuenosCalculados > 0) {
@@ -471,24 +579,18 @@ exports.finalizar = async (req, res) => {
     
     // NUEVA LÓGICA: Calcular recirculación repercap
     let recirculacionRepercapCalculada = null;
-    if (botesBuenosCalculados > 0 && numeroCorteSanitarioFinal !== null && numeroCorteSanitarioFinal !== undefined && 
+    
+    if (numeroCorteSanitarioFinal !== null && numeroCorteSanitarioFinal !== undefined && 
         ordenF.numeroCorteSanitarioInicial !== null && ordenF.numeroCorteSanitarioInicial !== undefined) {
+      
       const corteFinal = Number(numeroCorteSanitarioFinal);
       const corteInicial = Number(ordenF.numeroCorteSanitarioInicial);
-      const diferenciaCorteSanitario = corteFinal - corteInicial;
-      recirculacionRepercapCalculada = botesBuenosCalculados * diferenciaCorteSanitario;
+      
+      // Fórmula CORRECTA: (corteFinal - corteInicial) - totalUnidades
+      recirculacionRepercapCalculada = (corteFinal - corteInicial) - totalUnidades;
+      
+      console.log(`Recirculación repercap calculada: (${corteFinal} - ${corteInicial}) - ${totalUnidades} = ${recirculacionRepercapCalculada}`);
     }
-    
-    // Total de unidades producidas (buenas + malas)
-    const totalUnidades = unidadesCierreFinal + unidadesNoOkFinal;
-    
-    console.log(`DATOS PARA CÁLCULOS:`);
-    console.log(`- Botes buenos calculados: ${botesBuenosCalculados}`);
-    console.log(`- Unidades recuperadas calculadas: ${unidadesRecuperadasCalculadas}`);
-    console.log(`- Recirculación repercap calculada: ${recirculacionRepercapCalculada}`);
-    console.log(`- Unidades cierre final: ${unidadesCierreFinal}`);
-    console.log(`- Unidades NO OK final: ${unidadesNoOkFinal}`);
-    console.log(`- Total unidades: ${totalUnidades}`);
     
     // Cálculos de métricas (manteniendo la lógica existente)
     const tiempoEstimadoProduccion = ordenF.cantidadProducir / standardTeorico;
@@ -498,6 +600,13 @@ exports.finalizar = async (req, res) => {
     const tasaExpulsion = totalUnidades > 0 ? (unidadesExpulsadasFinal / totalUnidades) * 100 : 0;
     const tasaRecuperacionPonderal = unidadesPonderalTotalFinal > 0 ? (unidadesRecuperadasCalculadas / unidadesPonderalTotalFinal) * 100 : 0;
     const porcentajeCompletado = ordenF.cantidadProducir > 0 ? (unidadesCierreFinal / ordenF.cantidadProducir) * 100 : 0;
+    
+    // NUEVA MÉTRICA: Calcular tasa de recuperación repercap
+    let tasaRecuperacionRepercap = null;
+    if (recirculacionRepercapCalculada !== null && totalUnidades > 0) {
+      tasaRecuperacionRepercap = (recirculacionRepercapCalculada / totalUnidades) * 100;
+      console.log(`Tasa recuperación repercap calculada: ${tasaRecuperacionRepercap.toFixed(2)}%`);
+    }
     
     // Estándar real (unidades/hora)
     let standardReal = 0;
@@ -554,6 +663,7 @@ exports.finalizar = async (req, res) => {
       // Tasas (siguen como 0-100)
       tasaExpulsion: Number(tasaExpulsion.toFixed(6)),
       tasaRecuperacionPonderal: Number(tasaRecuperacionPonderal.toFixed(6)),
+      tasaRecuperacionRepercap: tasaRecuperacionRepercap !== null ? Number(tasaRecuperacionRepercap.toFixed(6)) : null,
       
       // Estándares
       standardReal: Number(standardReal.toFixed(6)),
@@ -571,6 +681,7 @@ exports.finalizar = async (req, res) => {
     console.log(`botesBuenos final: ${botesBuenosCalculados}`);
     console.log(`unidadesRecuperadas final: ${unidadesRecuperadasCalculadas}`);
     console.log(`recirculacionRepercap final: ${recirculacionRepercapCalculada}`);
+    console.log(`tasaRecuperacionRepercap final: ${tasaRecuperacionRepercap}%`);
     console.log(`tiempoTotal (minutos): ${tiempoTotalMinutos}`);
     console.log(`tiempoActivo (minutos): ${tiempoActivoMinutos}`);
     console.log(`tiempoPausadoTotal (minutos): ${tiempoPausadoTotalMinutos}`);
@@ -587,46 +698,44 @@ exports.finalizar = async (req, res) => {
     await transaction.commit();
     
     // Obtener la orden actualizada con todos los cálculos automáticos
-   const ordenActualizada = await OrdenFabricacion.findByPk(id, { 
-     include: ['pausas'],
-     transaction: null 
-   });
-   
-   // Verificar los valores guardados
-   console.log('VALORES GUARDADOS:');
-   console.log(`botesBuenos guardado: ${ordenActualizada.botesBuenos}`);
-   console.log(`unidadesRecuperadas guardado: ${ordenActualizada.unidadesRecuperadas}`);
-   console.log(`recirculacionRepercap guardado: ${ordenActualizada.recirculacionRepercap}`);
-   console.log(`tiempoPausadoTotal guardado (minutos): ${ordenActualizada.tiempoTotalPausas}`);
-   console.log(`standardReal guardado: ${ordenActualizada.standardReal}`);
-   console.log(`disponibilidad guardado: ${ordenActualizada.disponibilidad} (${ordenActualizada.disponibilidad * 100}%)`);
-   console.log(`rendimiento guardado: ${ordenActualizada.rendimiento} (${ordenActualizada.rendimiento * 100}%)`);
-   console.log(`calidad guardado: ${ordenActualizada.calidad} (${ordenActualizada.calidad * 100}%)`);
-   console.log(`oee guardado: ${ordenActualizada.oee} (${ordenActualizada.oee * 100}%)`);
-   
-   // Notificar a través de socket.io
-   const io = req.app.get('io');
-   io.emit('ordenFabricacion:updated', ordenActualizada);
-   
-   return res.status(200).json({ 
-     message: 'Orden de fabricación finalizada correctamente',
-     orden: ordenActualizada,
-     calculoAutomatico: {
-       botesPorCaja: ordenF.botesPorCaja,
-       cajasContadas: ordenF.cajasContadas,
-       botesBuenosCalculados: botesBuenosCalculados,
-       unidadesRecuperadasCalculadas: unidadesRecuperadasCalculadas,
-       recirculacionRepercapCalculada: recirculacionRepercapCalculada
-     }
-   });
- } catch (error) {
-   await transaction.rollback();
-   console.error('Error al finalizar orden de fabricación:', error);
-   return res.status(500).json({ 
-     message: 'Error al finalizar orden de fabricación',
-     error: error.message 
-   });
- }
+    const ordenActualizada = await OrdenFabricacion.findByPk(id, { 
+      include: ['pausas'],
+      transaction: null 
+    });
+    
+    // Verificar los valores guardados
+    console.log('VALORES GUARDADOS:');
+    console.log(`botesBuenos guardado: ${ordenActualizada.botesBuenos}`);
+    console.log(`unidadesRecuperadas guardado: ${ordenActualizada.unidadesRecuperadas}`);
+    console.log(`recirculacionRepercap guardado: ${ordenActualizada.recirculacionRepercap}`);
+    console.log(`tasaRecuperacionRepercap guardado: ${ordenActualizada.tasaRecuperacionRepercap}%`);
+    console.log(`tiempoPausadoTotal guardado (minutos): ${ordenActualizada.tiempoTotalPausas}`);
+    console.log(`standardReal guardado: ${ordenActualizada.standardReal}`);
+    
+    // Notificar a través de socket.io
+    const io = req.app.get('io');
+    io.emit('ordenFabricacion:updated', ordenActualizada);
+    
+    return res.status(200).json({ 
+      message: 'Orden de fabricación finalizada correctamente',
+      orden: ordenActualizada,
+      calculoAutomatico: {
+        botesPorCaja: ordenF.botesPorCaja,
+        cajasContadas: ordenF.cajasContadas,
+        botesBuenosCalculados: botesBuenosCalculados,
+        unidadesRecuperadasCalculadas: unidadesRecuperadasCalculadas,
+        recirculacionRepercapCalculada: recirculacionRepercapCalculada,
+        tasaRecuperacionRepercapCalculada: tasaRecuperacionRepercap
+      }
+    });
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Error al finalizar orden de fabricación:', error);
+    return res.status(500).json({ 
+      message: 'Error al finalizar orden de fabricación',
+      error: error.message 
+    });
+  }
 };
   
   // Agregar los nuevos métodos para gestionar botesOperario
@@ -885,52 +994,238 @@ exports.incrementarBotesBuenos = async (req, res) => {
   };
   
   // Incrementar el contador de botes expulsados
-  exports.incrementarBotesExpulsados = async (req, res) => {
-    const transaction = await sequelize.transaction();
+ exports.incrementarBotesExpulsados = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const { id } = req.params;
+    const { cantidad = 1 } = req.body; // Por defecto incrementa 1 bote
     
-    try {
-      const { id } = req.params;
-      const { cantidad = 1 } = req.body; // Por defecto incrementa 1 bote
-      
-      const ordenF = await OrdenFabricacion.findByPk(id, { transaction });
-      
-      if (!ordenF) {
-        await transaction.rollback();
-        return res.status(404).json({ message: 'Orden de fabricación no encontrada' });
-      }
-      
-      if (ordenF.estado === 'finalizada' || ordenF.estado === 'creada') {
-        await transaction.rollback();
-        return res.status(400).json({ message: `No se puede actualizar botes en estado ${ordenF.estado}` });
-      }
-      
-      // Incrementar el contador de botes expulsados
-      const botesExpulsadosActualizados = ordenF.botesExpulsados + cantidad;
-      
-      await ordenF.update({ 
-        botesExpulsados: botesExpulsadosActualizados 
-      }, { transaction });
-      
-      await transaction.commit();
-      
-      // Notificar a través de socket.io
-      const io = req.app.get('io');
-      io.emit('ordenFabricacion:updated', await OrdenFabricacion.findByPk(id, { include: ['pausas'] }));
-      
-      return res.status(200).json({ 
-        message: `Contador de botes expulsados actualizado a ${botesExpulsadosActualizados}`,
-        orden: await OrdenFabricacion.findByPk(id, { include: ['pausas'] })
-      });
-    } catch (error) {
+    const ordenF = await OrdenFabricacion.findByPk(id, { transaction });
+    
+    if (!ordenF) {
       await transaction.rollback();
-      console.error('Error al incrementar botes expulsados:', error);
-      return res.status(500).json({ 
-        message: 'Error al incrementar botes expulsados',
-        error: error.message 
-      });
+      return res.status(404).json({ message: 'Orden de fabricación no encontrada' });
     }
-  };
-  // Agregar al controlador ordenFabricacionController.js
+    
+    if (ordenF.estado === 'finalizada' || ordenF.estado === 'creada') {
+      await transaction.rollback();
+      return res.status(400).json({ message: `No se puede incrementar botes expulsados en estado ${ordenF.estado}` });
+    }
+    
+    // Incrementar el contador de botes expulsados
+    const botesExpulsadosActualizados = (ordenF.botesExpulsados || 0) + cantidad;
+    
+    // Calcular unidadesPonderalTotal automáticamente
+    const botesPonderal = ordenF.botesPonderal || 0;
+    const unidadesPonderalTotal = botesExpulsadosActualizados + botesPonderal;
+    
+    // Calcular recirculación ponderal automáticamente
+    const unidadesCierreFin = ordenF.unidadesCierreFin || ordenF.botesBuenos || 0;
+    const unidadesNoOkFin = ordenF.unidadesNoOkFin || 0;
+    const totalUnidadesProducidas = unidadesCierreFin + unidadesNoOkFin;
+    
+    let recirculacionPonderal = 0;
+    let tasaRecuperacionPonderal = 0;
+    
+    if (unidadesPonderalTotal > 0 && totalUnidadesProducidas > 0) {
+      recirculacionPonderal = unidadesPonderalTotal - totalUnidadesProducidas;
+      tasaRecuperacionPonderal = (recirculacionPonderal / totalUnidadesProducidas) * 100;
+    }
+    
+    await ordenF.update({ 
+      botesExpulsados: botesExpulsadosActualizados,
+      unidadesPonderalTotal: unidadesPonderalTotal,
+      recirculacionPonderal: recirculacionPonderal,
+      tasaRecuperacionPonderal: tasaRecuperacionPonderal
+    }, { transaction });
+    
+    await transaction.commit();
+    
+    // Notificar a través de socket.io
+    const io = req.app.get('io');
+    io.emit('ordenFabricacion:updated', await OrdenFabricacion.findByPk(id, { include: ['pausas'] }));
+    
+    console.log(`PIN 22 activado - Botes expulsados incrementado: ${botesExpulsadosActualizados}`);
+    console.log(`Unidades ponderal total: ${unidadesPonderalTotal}`);
+    console.log(`Recirculación ponderal: ${recirculacionPonderal}`);
+    console.log(`Tasa recuperación ponderal: ${tasaRecuperacionPonderal.toFixed(2)}%`);
+    
+    return res.status(200).json({ 
+      message: `Contador de botes expulsados incrementado a ${botesExpulsadosActualizados}`,
+      orden: await OrdenFabricacion.findByPk(id, { include: ['pausas'] }),
+      calculosAutomaticos: {
+        botesExpulsados: botesExpulsadosActualizados,
+        botesPonderal: botesPonderal,
+        unidadesPonderalTotal: unidadesPonderalTotal,
+        recirculacionPonderal: recirculacionPonderal,
+        tasaRecuperacionPonderal: tasaRecuperacionPonderal
+      }
+    });
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Error al incrementar botes expulsados:', error);
+    return res.status(500).json({ 
+      message: 'Error al incrementar botes expulsados',
+      error: error.message 
+    });
+  }
+};
+exports.establecerBotesPonderal = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const { id } = req.params;
+    const { cantidad } = req.body;
+    
+    if (cantidad === undefined) {
+      await transaction.rollback();
+      return res.status(400).json({ message: 'La cantidad de botes ponderal es obligatoria' });
+    }
+    
+    const ordenF = await OrdenFabricacion.findByPk(id, { transaction });
+    
+    if (!ordenF) {
+      await transaction.rollback();
+      return res.status(404).json({ message: 'Orden de fabricación no encontrada' });
+    }
+    
+    if (ordenF.estado === 'finalizada' || ordenF.estado === 'creada') {
+      await transaction.rollback();
+      return res.status(400).json({ message: `No se puede establecer botes ponderal en estado ${ordenF.estado}` });
+    }
+    
+    // Establecer el contador de botes ponderal
+    const botesPonderalEstablecidos = Number(cantidad);
+    
+    // Calcular unidadesPonderalTotal automáticamente
+    const botesExpulsados = ordenF.botesExpulsados || 0;
+    const unidadesPonderalTotal = botesPonderalEstablecidos + botesExpulsados;
+    
+    // Calcular recirculación ponderal automáticamente
+    const unidadesCierreFin = ordenF.unidadesCierreFin || ordenF.botesBuenos || 0;
+    const unidadesNoOkFin = ordenF.unidadesNoOkFin || 0;
+    const totalUnidadesProducidas = unidadesCierreFin + unidadesNoOkFin;
+    
+    let recirculacionPonderal = 0;
+    let tasaRecuperacionPonderal = 0;
+    
+    if (unidadesPonderalTotal > 0 && totalUnidadesProducidas > 0) {
+      recirculacionPonderal = unidadesPonderalTotal - totalUnidadesProducidas;
+      tasaRecuperacionPonderal = (recirculacionPonderal / totalUnidadesProducidas) * 100;
+    }
+    
+    await ordenF.update({ 
+      botesPonderal: botesPonderalEstablecidos,
+      unidadesPonderalTotal: unidadesPonderalTotal,
+      recirculacionPonderal: recirculacionPonderal,
+      tasaRecuperacionPonderal: tasaRecuperacionPonderal
+    }, { transaction });
+    
+    await transaction.commit();
+    
+    // Notificar a través de socket.io
+    const io = req.app.get('io');
+    io.emit('ordenFabricacion:updated', await OrdenFabricacion.findByPk(id, { include: ['pausas'] }));
+    
+    return res.status(200).json({ 
+      message: `Contador de botes ponderal establecido a ${botesPonderalEstablecidos}`,
+      orden: await OrdenFabricacion.findByPk(id, { include: ['pausas'] }),
+      calculosAutomaticos: {
+        botesPonderal: botesPonderalEstablecidos,
+        botesExpulsados: botesExpulsados,
+        unidadesPonderalTotal: unidadesPonderalTotal,
+        recirculacionPonderal: recirculacionPonderal,
+        tasaRecuperacionPonderal: tasaRecuperacionPonderal
+      }
+    });
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Error al establecer botes ponderal:', error);
+    return res.status(500).json({ 
+      message: 'Error al establecer botes ponderal',
+      error: error.message 
+    });
+  }
+};
+  
+  exports.incrementarBotesPonderal = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const { id } = req.params;
+    const { cantidad = 1 } = req.body; // Por defecto incrementa 1 bote
+    
+    const ordenF = await OrdenFabricacion.findByPk(id, { transaction });
+    
+    if (!ordenF) {
+      await transaction.rollback();
+      return res.status(404).json({ message: 'Orden de fabricación no encontrada' });
+    }
+    
+    if (ordenF.estado === 'finalizada' || ordenF.estado === 'creada') {
+      await transaction.rollback();
+      return res.status(400).json({ message: `No se puede incrementar botes ponderal en estado ${ordenF.estado}` });
+    }
+    
+    // Incrementar el contador de botes ponderal
+    const botesPonderalActualizados = (ordenF.botesPonderal || 0) + cantidad;
+    
+    // Calcular unidadesPonderalTotal automáticamente
+    const botesExpulsados = ordenF.botesExpulsados || 0;
+    const unidadesPonderalTotal = botesPonderalActualizados + botesExpulsados;
+    
+    // Calcular recirculación ponderal automáticamente
+    const unidadesCierreFin = ordenF.unidadesCierreFin || ordenF.botesBuenos || 0;
+    const unidadesNoOkFin = ordenF.unidadesNoOkFin || 0;
+    const totalUnidadesProducidas = unidadesCierreFin + unidadesNoOkFin;
+    
+    let recirculacionPonderal = 0;
+    let tasaRecuperacionPonderal = 0;
+    
+    if (unidadesPonderalTotal > 0 && totalUnidadesProducidas > 0) {
+      recirculacionPonderal = unidadesPonderalTotal - totalUnidadesProducidas;
+      tasaRecuperacionPonderal = (recirculacionPonderal / totalUnidadesProducidas) * 100;
+    }
+    
+    await ordenF.update({ 
+      botesPonderal: botesPonderalActualizados,
+      unidadesPonderalTotal: unidadesPonderalTotal,
+      recirculacionPonderal: recirculacionPonderal,
+      tasaRecuperacionPonderal: tasaRecuperacionPonderal
+    }, { transaction });
+    
+    await transaction.commit();
+    
+    // Notificar a través de socket.io
+    const io = req.app.get('io');
+    io.emit('ordenFabricacion:updated', await OrdenFabricacion.findByPk(id, { include: ['pausas'] }));
+    
+    console.log(`PIN 23 activado - Botes ponderal incrementado: ${botesPonderalActualizados}`);
+    console.log(`Unidades ponderal total: ${unidadesPonderalTotal}`);
+    console.log(`Recirculación ponderal: ${recirculacionPonderal}`);
+    console.log(`Tasa recuperación ponderal: ${tasaRecuperacionPonderal.toFixed(2)}%`);
+    
+    return res.status(200).json({ 
+      message: `Contador de botes ponderal incrementado a ${botesPonderalActualizados}`,
+      orden: await OrdenFabricacion.findByPk(id, { include: ['pausas'] }),
+      calculosAutomaticos: {
+        botesPonderal: botesPonderalActualizados,
+        botesExpulsados: botesExpulsados,
+        unidadesPonderalTotal: unidadesPonderalTotal,
+        recirculacionPonderal: recirculacionPonderal,
+        tasaRecuperacionPonderal: tasaRecuperacionPonderal
+      }
+    });
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Error al incrementar botes ponderal:', error);
+    return res.status(500).json({ 
+      message: 'Error al incrementar botes ponderal',
+      error: error.message 
+    });
+  }
+};
 
 // Incrementar el contador de cajas
 exports.incrementarCajas = async (req, res) => {
