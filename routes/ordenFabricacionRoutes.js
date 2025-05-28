@@ -2,27 +2,26 @@ const express = require('express');
 const router = express.Router();
 const ordenFabricacionController = require('../controllers/ordenFabricacionController');
 
-// Rutas para órdenes de fabricación
+// Rutas básicas para órdenes de fabricación
 router.get('/', ordenFabricacionController.getAll);
 router.get('/:id', ordenFabricacionController.getById);
 router.post('/', ordenFabricacionController.create);
 router.put('/:id', ordenFabricacionController.update);
 router.delete('/:id', ordenFabricacionController.delete);
 
-// Rutas para contadores de botes
+// NUEVA RUTA: Actualizar detalles del producto manualmente
+router.put('/:id/detalles-producto', ordenFabricacionController.actualizarDetallesProducto);
+
+// Rutas para contadores de botes buenos
 router.post('/:id/incrementar-botes-buenos', ordenFabricacionController.incrementarBotesBuenos);
 router.post('/:id/establecer-botes-buenos', ordenFabricacionController.establecerBotesBuenos);
 
-// NUEVAS RUTAS para botes ponderal (PIN 23)
+// Rutas para botes ponderal (PIN 23)
 router.post('/:id/incrementar-botes-ponderal', ordenFabricacionController.incrementarBotesPonderal);
 router.post('/:id/establecer-botes-ponderal', ordenFabricacionController.establecerBotesPonderal);
 
-// Rutas para botes expulsados (PIN 22) - ya existente pero actualizada
+// Rutas para botes expulsados (PIN 22)
 router.post('/:id/incrementar-botes-expulsados', ordenFabricacionController.incrementarBotesExpulsados);
-
-// Rutas para botes operario
-router.post('/:id/incrementar-botes-operario', ordenFabricacionController.incrementarBotesOperario);
-router.post('/:id/establecer-botes-operario', ordenFabricacionController.establecerBotesOperario);
 
 // Rutas para gestión de cajas
 router.post('/:id/incrementar-cajas', ordenFabricacionController.incrementarCajas);
