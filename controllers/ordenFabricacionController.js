@@ -71,7 +71,7 @@ exports.create = async (req, res) => {
       numeroCajas: parseInt(req.body.numeroCajas),
       repercap: Boolean(req.body.repercap),
       estado: 'creada',
-      tiempoEstimadoProduccion: parseInt(req.body.cantidadProducir) / 4000
+      tiempoEstimadoProduccion: parseInt(req.body.cantidadProducir) / 2000
     };
     
     // Solo agregar campos opcionales si tienen valor
@@ -173,7 +173,9 @@ exports.create = async (req, res) => {
       error: process.env.NODE_ENV === 'development' ? error.message : 'Error interno'
     });
   }
-};// Iniciar una orden de fabricación
+};
+
+// Iniciar una orden de fabricación
 exports.iniciar = async (req, res) => {
   const transaction = await sequelize.transaction();
   
@@ -226,9 +228,12 @@ exports.iniciar = async (req, res) => {
           duracion: duracionPausa
         }, { transaction });
         
-        await ordenF.update({
-          tiempoPausado: (ordenF.tiempoPausado || 0) + duracionPausa
-        }, { transaction });
+        // Solo sumar al tiempo pausado si NO es un tipo especial de pausa
+        if (pausaActiva.tipoPausa !== 'cambio_turno' && pausaActiva.tipoPausa !== 'pausa_parcial') {
+          await ordenF.update({
+            tiempoPausado: (ordenF.tiempoPausado || 0) + duracionPausa
+          }, { transaction });
+        }
       }
     }
     
@@ -264,7 +269,7 @@ exports.iniciar = async (req, res) => {
   }
 };
 
-// Pausar una orden de fabricación
+// Pausar una orden de fabricación (ACTUALIZADO)
 exports.pausar = async (req, res) => {
   const transaction = await sequelize.transaction();
   
@@ -276,6 +281,32 @@ exports.pausar = async (req, res) => {
       await transaction.rollback();
       return res.status(400).json({ message: 'El tipo de pausa es obligatorio' });
     }
+    
+    // Obtener todos los tipos de pausa disponibles
+    // En ordenFabricacionController.js, en la función pausar
+// Validar tipos de pausa permitidos
+const tiposPausaPermitidos = [
+  'Preparación Arranque',
+  'Verificación Calidad',
+  'Falta de Material',
+  'Incidencia Máquina: Posicionadora',
+  'Incidencia Máquina: Contadora',
+  'Incidencia Máquina: Taponadora',
+  'Incidencia Máquina: Etiquetadora',
+  'Incidencia Máquina: Controladora de Peso',
+  'Incidencia Máquina: Repercap',
+  'Incidencia Máquina: Otros',
+  'Mantenimiento',
+  'cambio_turno',
+  'pausa_parcial'
+];
+
+if (!tiposPausaPermitidos.includes(tipoPausa)) {
+  await transaction.rollback();
+  return res.status(400).json({ 
+    message: `Tipo de pausa no válido. Tipos permitidos: ${tiposPausaPermitidos.join(', ')}` 
+  });
+}
     
     const ordenF = await OrdenFabricacion.findByPk(id, { transaction });
     
@@ -291,13 +322,17 @@ exports.pausar = async (req, res) => {
       });
     }
     
+    // Determinar si computa en tiempo
+    const computaEnTiempo = !['cambio_turno', 'pausa_parcial'].includes(tipoPausa);
+    
     // Crear el registro de pausa
     const ahora = new Date();
     const pausa = await Pausa.create({
       ordenFabricacionId: id,
       horaInicio: ahora,
       tipoPausa,
-      comentario
+      comentario,
+      computaEnTiempo
     }, { transaction });
     
     // Actualizar el estado de la orden
@@ -311,10 +346,15 @@ exports.pausar = async (req, res) => {
     const io = req.app.get('io');
     io.emit('ordenFabricacion:updated', await OrdenFabricacion.findByPk(id, { include: ['pausas'] }));
     
+    const mensajeTipoPausa = !computaEnTiempo 
+      ? ' (No computa en tiempo de pausas)'
+      : '';
+    
     return res.status(200).json({ 
-      message: 'Orden de fabricación pausada correctamente',
+      message: `Orden de fabricación pausada correctamente${mensajeTipoPausa}`,
       orden: await OrdenFabricacion.findByPk(id, { include: ['pausas'] }),
-      pausa
+      pausa,
+      computaEnTiempo
     });
   } catch (error) {
     await transaction.rollback();
@@ -325,6 +365,266 @@ exports.pausar = async (req, res) => {
     });
   }
 };
+
+// Función auxiliar para calcular tiempo total de pausas que sí computan
+const calcularTiempoPausasQueComputan = async (ordenFabricacionId, transaction = null) => {
+  const pausas = await Pausa.findAll({
+    where: { 
+      ordenFabricacionId,
+      horaFin: { [require('sequelize').Op.ne]: null } // Solo pausas finalizadas
+    },
+    transaction
+  });
+  
+  let tiempoPausadoTotalMinutos = 0;
+  for (const pausa of pausas) {
+    // Solo sumar si la pausa computa en tiempo (no es cambio_turno ni pausa_parcial)
+    if (pausa.computaEnTiempo !== false && 
+        pausa.tipoPausa !== 'cambio_turno' && 
+        pausa.tipoPausa !== 'pausa_parcial' &&
+        pausa.duracion !== null && 
+        pausa.duracion !== undefined) {
+      tiempoPausadoTotalMinutos += pausa.duracion;
+    }
+  }
+  
+  return tiempoPausadoTotalMinutos;
+};
+
+// Finalizar una orden de fabricación (ACTUALIZADO)
+exports.finalizar = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const { id } = req.params;
+    const { 
+      unidadesCierreFin, 
+      unidadesNoOkFin, 
+      numeroCorteSanitarioFinal,
+      unidadesPonderalTotal
+    } = req.body;
+    
+    const ordenF = await OrdenFabricacion.findByPk(id, { 
+      include: ['pausas'],
+      transaction 
+    });
+    
+    if (!ordenF) {
+      await transaction.rollback();
+      return res.status(404).json({ message: 'Orden de fabricación no encontrada' });
+    }
+    
+    if (ordenF.estado === 'finalizada') {
+      await transaction.rollback();
+      return res.status(400).json({ message: 'La orden ya está finalizada' });
+    }
+    
+    // Calcular botes buenos automáticamente si hay datos
+    let botesBuenosCalculados = ordenF.botesBuenos || 0;
+    if (ordenF.botesPorCaja && ordenF.botesPorCaja > 0 && ordenF.cajasContadas && ordenF.cajasContadas > 0) {
+      botesBuenosCalculados = ordenF.botesPorCaja * ordenF.cajasContadas;
+      console.log(`Botes buenos calculados automáticamente: ${ordenF.botesPorCaja} botes/caja * ${ordenF.cajasContadas} cajas = ${botesBuenosCalculados} botes`);
+    }
+    
+    // Si la orden estaba pausada, cerrar la pausa activa
+    if (ordenF.estado === 'pausada') {
+      const pausaActiva = await Pausa.findOne({
+        where: { 
+          ordenFabricacionId: id,
+          horaFin: null
+        },
+        transaction
+      });
+      
+      if (pausaActiva) {
+        const ahora = new Date();
+        const duracionPausa = Math.floor((ahora - pausaActiva.horaInicio) / (1000 * 60));
+        
+        await pausaActiva.update({
+          horaFin: ahora,
+          duracion: duracionPausa
+        }, { transaction });
+      }
+    }
+    
+    // Calcular el tiempo total pausado SOLO de pausas que computan
+    const tiempoPausadoTotalMinutos = await calcularTiempoPausasQueComputan(id, transaction);
+    
+    // Calcular tiempos
+    const ahora = new Date();
+    let tiempoTotalMinutos = 0;
+    
+    if (ordenF.horaInicio) {
+      tiempoTotalMinutos = Math.floor((ahora - ordenF.horaInicio) / (1000 * 60));
+      if (tiempoTotalMinutos < 1) tiempoTotalMinutos = 1;
+    }
+    
+    const tiempoActivoMinutos = tiempoTotalMinutos - tiempoPausadoTotalMinutos;
+    
+    // Convertir valores a números
+    const unidadesCierreFinal = Number(unidadesCierreFin) || Number(botesBuenosCalculados) || Number(ordenF.unidadesCierreFin) || 0;
+    const unidadesNoOkFinal = Number(unidadesNoOkFin) || Number(ordenF.unidadesNoOkFin) || 0;
+    const unidadesExpulsadasFinal = Number(ordenF.botesExpulsados) || 0;
+    const unidadesPonderalTotalFinal = Number(unidadesPonderalTotal) || Number(ordenF.unidadesPonderalTotal) || 0;
+    
+    // Total de unidades producidas
+    const totalUnidades = unidadesCierreFinal + unidadesNoOkFinal;
+    
+    // Calcular unidades recuperadas automáticamente
+    let unidadesRecuperadasCalculadas = 0;
+    if (unidadesPonderalTotalFinal > 0 && botesBuenosCalculados > 0) {
+      unidadesRecuperadasCalculadas = unidadesPonderalTotalFinal - botesBuenosCalculados;
+      if (unidadesRecuperadasCalculadas < 0) {
+        unidadesRecuperadasCalculadas = 0;
+      }
+    }
+    
+    // Calcular recirculación repercap
+    let recirculacionRepercapCalculada = null;
+    if (numeroCorteSanitarioFinal !== null && numeroCorteSanitarioFinal !== undefined && 
+        ordenF.numeroCorteSanitarioInicial !== null && ordenF.numeroCorteSanitarioInicial !== undefined) {
+      
+      const corteFinal = Number(numeroCorteSanitarioFinal);
+      const corteInicial = Number(ordenF.numeroCorteSanitarioInicial);
+      recirculacionRepercapCalculada = (corteFinal - corteInicial) - totalUnidades;
+    }
+    
+    // Calcular métricas
+    const tiempoEstimadoProduccion = ordenF.cantidadProducir / 2000;
+    const porcentajePausas = tiempoTotalMinutos > 0 ? (tiempoPausadoTotalMinutos / tiempoTotalMinutos) * 100 : 0;
+    const porcentajeUnidadesOk = totalUnidades > 0 ? (unidadesCierreFinal / totalUnidades) * 100 : 0;
+    const porcentajeUnidadesNoOk = totalUnidades > 0 ? (unidadesNoOkFinal / totalUnidades) * 100 : 0;
+    const tasaExpulsion = totalUnidades > 0 ? (unidadesExpulsadasFinal / totalUnidades) * 100 : 0;
+    const porcentajeCompletado = ordenF.cantidadProducir > 0 ? (unidadesCierreFinal / ordenF.cantidadProducir) * 100 : 0;
+    
+    // Calcular tasa de recuperación repercap
+    let tasaRecuperacionRepercap = null;
+    if (recirculacionRepercapCalculada !== null && totalUnidades > 0) {
+      tasaRecuperacionRepercap = (recirculacionRepercapCalculada / totalUnidades) * 100;
+    }
+    
+    // Estándar real (unidades/hora)
+    let standardReal = 0;
+    if (tiempoActivoMinutos > 0) {
+      const unidadesPorMinuto = totalUnidades / tiempoActivoMinutos;
+      standardReal = unidadesPorMinuto * 60;
+    }
+    
+    const standardTeorico = 2000;
+    const standardRealVsTeorico = standardTeorico > 0 ? (standardReal / standardTeorico) * 100 : 0;
+    const disponibilidad = tiempoTotalMinutos > 0 ? tiempoActivoMinutos / tiempoTotalMinutos : 0;
+    
+    // Rendimiento (como decimal 0-1)
+    let rendimiento = 0;
+    if (tiempoActivoMinutos > 0) {
+      const standardTeoricoMinuto = standardTeorico / 60;
+      const unidadesTeoricas = tiempoActivoMinutos * standardTeoricoMinuto;
+      rendimiento = unidadesTeoricas > 0 ? totalUnidades / unidadesTeoricas : 0;
+    }
+    
+    const calidad = totalUnidades > 0 ? unidadesCierreFinal / totalUnidades : 0;
+    const oee = disponibilidad * rendimiento * calidad;
+    
+    // Preparar datos de actualización
+    const datosActualizacion = {
+      estado: 'finalizada',
+      horaFin: ahora,
+      tiempoTotal: Number(tiempoTotalMinutos),
+      tiempoTotalActivo: Number(tiempoActivoMinutos),
+      tiempoTotalPausas: Number(tiempoPausadoTotalMinutos), // Solo pausas que computan
+      tiempoEstimadoProduccion: Number(tiempoEstimadoProduccion.toFixed(6)),
+      
+      // Valores calculados automáticamente
+      botesBuenos: Number(botesBuenosCalculados),
+      unidadesRecuperadas: Number(unidadesRecuperadasCalculadas),
+      recirculacionRepercap: recirculacionRepercapCalculada,
+      
+      // Datos de cierre
+      unidadesCierreFin: Number(unidadesCierreFinal),
+      unidadesNoOkFin: Number(unidadesNoOkFinal),
+      numeroCorteSanitarioFinal: numeroCorteSanitarioFinal ? Number(numeroCorteSanitarioFinal) : ordenF.numeroCorteSanitarioFinal,
+      
+      // Total de unidades
+      totalUnidades: Number(totalUnidades),
+      
+      // Unidades especiales
+      unidadesPonderalTotal: Number(unidadesPonderalTotalFinal),
+      unidadesExpulsadas: Number(unidadesExpulsadasFinal),
+      
+      // Porcentajes (0-100)
+      porcentajeUnidadesOk: Number(porcentajeUnidadesOk.toFixed(6)),
+      porcentajeUnidadesNoOk: Number(porcentajeUnidadesNoOk.toFixed(6)),
+      porcentajePausas: Number(porcentajePausas.toFixed(6)),
+      porcentajeCompletado: Number(porcentajeCompletado.toFixed(6)),
+      
+      // Tasas (0-100)
+      tasaExpulsion: Number(tasaExpulsion.toFixed(6)),
+      tasaRecuperacionRepercap: tasaRecuperacionRepercap !== null ? Number(tasaRecuperacionRepercap.toFixed(6)) : null,
+      
+      // Estándares
+      standardReal: Number(standardReal.toFixed(6)),
+      standardRealVsTeorico: Number(standardRealVsTeorico.toFixed(6)),
+      
+      // Métricas OEE (como decimales 0-1)
+      disponibilidad: Number(disponibilidad.toFixed(6)),
+      rendimiento: Number(rendimiento.toFixed(6)),
+      calidad: Number(calidad.toFixed(6)),
+      oee: Number(oee.toFixed(6))
+    };
+    
+    console.log('RESULTADOS FINALES:');
+    console.log(`botesBuenos final: ${botesBuenosCalculados}`);
+    console.log(`unidadesRecuperadas final: ${unidadesRecuperadasCalculadas}`);
+    console.log(`recirculacionRepercap final: ${recirculacionRepercapCalculada}`);
+    console.log(`tasaRecuperacionRepercap final: ${tasaRecuperacionRepercap}%`);
+    console.log(`tiempoTotal (minutos): ${tiempoTotalMinutos}`);
+    console.log(`tiempoActivo (minutos): ${tiempoActivoMinutos}`);
+    console.log(`tiempoPausadoTotal (minutos): ${tiempoPausadoTotalMinutos} (solo pausas que computan)`);
+    console.log(`standardReal: ${standardReal.toFixed(2)} unidades/hora`);
+    console.log(`OEE: ${(oee * 100).toFixed(2)}%`);
+    
+    // Actualizar orden deshabilitando hooks para evitar recálculos
+    await ordenF.update(datosActualizacion, { 
+      transaction,
+      hooks: false
+    });
+    
+    await transaction.commit();
+    
+    // Obtener la orden actualizada
+    const ordenActualizada = await OrdenFabricacion.findByPk(id, { 
+      include: ['pausas']
+    });
+    
+    // Notificar a través de socket.io
+    const io = req.app.get('io');
+    io.emit('ordenFabricacion:updated', ordenActualizada);
+    
+    return res.status(200).json({ 
+      message: 'Orden de fabricación finalizada correctamente',
+      orden: ordenActualizada,
+      calculoAutomatico: {
+        botesPorCaja: ordenF.botesPorCaja,
+        cajasContadas: ordenF.cajasContadas,
+        botesBuenosCalculados: botesBuenosCalculados,
+        unidadesRecuperadasCalculadas: unidadesRecuperadasCalculadas,
+        recirculacionRepercapCalculada: recirculacionRepercapCalculada,
+        tasaRecuperacionRepercapCalculada: tasaRecuperacionRepercap,
+        tiempoPausasQueComputan: tiempoPausadoTotalMinutos
+      }
+    });
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Error al finalizar orden de fabricación:', error);
+    return res.status(500).json({ 
+      message: 'Error al finalizar orden de fabricación',
+      error: error.message 
+    });
+  }
+};
+
+// ... resto de métodos sin cambios ...
+// (todos los demás métodos permanecen igual)
 
 // Actualizar detalles del producto manualmente
 exports.actualizarDetallesProducto = async (req, res) => {
@@ -430,246 +730,7 @@ exports.actualizarDetallesProducto = async (req, res) => {
   }
 };
 
-// Finalizar una orden de fabricación  
-exports.finalizar = async (req, res) => {
-  const transaction = await sequelize.transaction();
-  
-  try {
-    const { id } = req.params;
-    const { 
-      unidadesCierreFin, 
-      unidadesNoOkFin, 
-      numeroCorteSanitarioFinal,
-      unidadesPonderalTotal
-    } = req.body;
-    
-    const ordenF = await OrdenFabricacion.findByPk(id, { 
-      include: ['pausas'],
-      transaction 
-    });
-    
-    if (!ordenF) {
-      await transaction.rollback();
-      return res.status(404).json({ message: 'Orden de fabricación no encontrada' });
-    }
-    
-    if (ordenF.estado === 'finalizada') {
-      await transaction.rollback();
-      return res.status(400).json({ message: 'La orden ya está finalizada' });
-    }
-    
-    // Calcular botes buenos automáticamente si hay datos
-    let botesBuenosCalculados = ordenF.botesBuenos || 0;
-    if (ordenF.botesPorCaja && ordenF.botesPorCaja > 0 && ordenF.cajasContadas && ordenF.cajasContadas > 0) {
-      botesBuenosCalculados = ordenF.botesPorCaja * ordenF.cajasContadas;
-      console.log(`Botes buenos calculados automáticamente: ${ordenF.botesPorCaja} botes/caja * ${ordenF.cajasContadas} cajas = ${botesBuenosCalculados} botes`);
-    }
-    
-    // Si la orden estaba pausada, cerrar la pausa activa
-    if (ordenF.estado === 'pausada') {
-      const pausaActiva = await Pausa.findOne({
-        where: { 
-          ordenFabricacionId: id,
-          horaFin: null
-        },
-        transaction
-      });
-      
-      if (pausaActiva) {
-        const ahora = new Date();
-        const duracionPausa = Math.floor((ahora - pausaActiva.horaInicio) / (1000 * 60));
-        
-        await pausaActiva.update({
-          horaFin: ahora,
-          duracion: duracionPausa
-        }, { transaction });
-      }
-    }
-    
-    // Calcular el tiempo total pausado sumando todas las pausas
-    const pausas = await Pausa.findAll({
-      where: { ordenFabricacionId: id },
-      transaction
-    });
-    
-    let tiempoPausadoTotalMinutos = 0;
-    for (const pausa of pausas) {
-      if (pausa.duracion !== null && pausa.duracion !== undefined) {
-        tiempoPausadoTotalMinutos += pausa.duracion;
-      }
-    }
-    
-    // Calcular tiempos
-    const ahora = new Date();
-    let tiempoTotalMinutos = 0;
-    
-    if (ordenF.horaInicio) {
-      tiempoTotalMinutos = Math.floor((ahora - ordenF.horaInicio) / (1000 * 60));
-      if (tiempoTotalMinutos < 1) tiempoTotalMinutos = 1;
-    }
-    
-    const tiempoActivoMinutos = tiempoTotalMinutos - tiempoPausadoTotalMinutos;
-    
-    // Convertir valores a números
-    const unidadesCierreFinal = Number(unidadesCierreFin) || Number(botesBuenosCalculados) || Number(ordenF.unidadesCierreFin) || 0;
-    const unidadesNoOkFinal = Number(unidadesNoOkFin) || Number(ordenF.unidadesNoOkFin) || 0;
-    const unidadesExpulsadasFinal = Number(ordenF.botesExpulsados) || 0;
-    const unidadesPonderalTotalFinal = Number(unidadesPonderalTotal) || Number(ordenF.unidadesPonderalTotal) || 0;
-    
-    // Total de unidades producidas
-    const totalUnidades = unidadesCierreFinal + unidadesNoOkFinal;
-    
-    // Calcular unidades recuperadas automáticamente
-    let unidadesRecuperadasCalculadas = 0;
-    if (unidadesPonderalTotalFinal > 0 && botesBuenosCalculados > 0) {
-      unidadesRecuperadasCalculadas = unidadesPonderalTotalFinal - botesBuenosCalculados;
-      if (unidadesRecuperadasCalculadas < 0) {
-        unidadesRecuperadasCalculadas = 0;
-      }
-    }
-    
-    // Calcular recirculación repercap
-    let recirculacionRepercapCalculada = null;
-    if (numeroCorteSanitarioFinal !== null && numeroCorteSanitarioFinal !== undefined && 
-        ordenF.numeroCorteSanitarioInicial !== null && ordenF.numeroCorteSanitarioInicial !== undefined) {
-      
-      const corteFinal = Number(numeroCorteSanitarioFinal);
-      const corteInicial = Number(ordenF.numeroCorteSanitarioInicial);
-      recirculacionRepercapCalculada = (corteFinal - corteInicial) - totalUnidades;
-    }
-    
-    // Calcular métricas
-    const tiempoEstimadoProduccion = ordenF.cantidadProducir / 4000;
-    const porcentajePausas = tiempoTotalMinutos > 0 ? (tiempoPausadoTotalMinutos / tiempoTotalMinutos) * 100 : 0;
-    const porcentajeUnidadesOk = totalUnidades > 0 ? (unidadesCierreFinal / totalUnidades) * 100 : 0;
-    const porcentajeUnidadesNoOk = totalUnidades > 0 ? (unidadesNoOkFinal / totalUnidades) * 100 : 0;
-    const tasaExpulsion = totalUnidades > 0 ? (unidadesExpulsadasFinal / totalUnidades) * 100 : 0;
-    const porcentajeCompletado = ordenF.cantidadProducir > 0 ? (unidadesCierreFinal / ordenF.cantidadProducir) * 100 : 0;
-    
-    // Calcular tasa de recuperación repercap
-    let tasaRecuperacionRepercap = null;
-    if (recirculacionRepercapCalculada !== null && totalUnidades > 0) {
-      tasaRecuperacionRepercap = (recirculacionRepercapCalculada / totalUnidades) * 100;
-    }
-    
-    // Estándar real (unidades/hora)
-    let standardReal = 0;
-    if (tiempoActivoMinutos > 0) {
-      const unidadesPorMinuto = totalUnidades / tiempoActivoMinutos;
-      standardReal = unidadesPorMinuto * 60;
-    }
-    
-    const standardTeorico = 4000;
-    const standardRealVsTeorico = standardTeorico > 0 ? (standardReal / standardTeorico) * 100 : 0;
-    const disponibilidad = tiempoTotalMinutos > 0 ? tiempoActivoMinutos / tiempoTotalMinutos : 0;
-    
-    // Rendimiento (como decimal 0-1)
-    let rendimiento = 0;
-    if (tiempoActivoMinutos > 0) {
-      const standardTeoricoMinuto = standardTeorico / 60;
-      const unidadesTeoricas = tiempoActivoMinutos * standardTeoricoMinuto;
-      rendimiento = unidadesTeoricas > 0 ? totalUnidades / unidadesTeoricas : 0;
-    }
-    
-    const calidad = totalUnidades > 0 ? unidadesCierreFinal / totalUnidades : 0;
-    const oee = disponibilidad * rendimiento * calidad;
-    
-    // Preparar datos de actualización
-    const datosActualizacion = {
-      estado: 'finalizada',
-      horaFin: ahora,
-      tiempoTotal: Number(tiempoTotalMinutos),
-      tiempoTotalActivo: Number(tiempoActivoMinutos),
-      tiempoTotalPausas: Number(tiempoPausadoTotalMinutos),
-      tiempoEstimadoProduccion: Number(tiempoEstimadoProduccion.toFixed(6)),
-      
-      // Valores calculados automáticamente
-      botesBuenos: Number(botesBuenosCalculados),
-      unidadesRecuperadas: Number(unidadesRecuperadasCalculadas),
-      recirculacionRepercap: recirculacionRepercapCalculada,
-      
-      // Datos de cierre
-      unidadesCierreFin: Number(unidadesCierreFinal),
-      unidadesNoOkFin: Number(unidadesNoOkFinal),
-      numeroCorteSanitarioFinal: numeroCorteSanitarioFinal ? Number(numeroCorteSanitarioFinal) : ordenF.numeroCorteSanitarioFinal,
-      
-      // Total de unidades
-      totalUnidades: Number(totalUnidades),
-      
-      // Unidades especiales
-      unidadesPonderalTotal: Number(unidadesPonderalTotalFinal),
-      unidadesExpulsadas: Number(unidadesExpulsadasFinal),
-      
-      // Porcentajes (0-100)
-      porcentajeUnidadesOk: Number(porcentajeUnidadesOk.toFixed(6)),
-      porcentajeUnidadesNoOk: Number(porcentajeUnidadesNoOk.toFixed(6)),
-      porcentajePausas: Number(porcentajePausas.toFixed(6)),
-      porcentajeCompletado: Number(porcentajeCompletado.toFixed(6)),
-      
-      // Tasas (0-100)
-      tasaExpulsion: Number(tasaExpulsion.toFixed(6)),
-      tasaRecuperacionRepercap: tasaRecuperacionRepercap !== null ? Number(tasaRecuperacionRepercap.toFixed(6)) : null,
-      
-      // Estándares
-      standardReal: Number(standardReal.toFixed(6)),
-      standardRealVsTeorico: Number(standardRealVsTeorico.toFixed(6)),
-      
-      // Métricas OEE (como decimales 0-1)
-      disponibilidad: Number(disponibilidad.toFixed(6)),
-      rendimiento: Number(rendimiento.toFixed(6)),
-      calidad: Number(calidad.toFixed(6)),
-      oee: Number(oee.toFixed(6))
-    };
-    
-    console.log('RESULTADOS FINALES:');
-    console.log(`botesBuenos final: ${botesBuenosCalculados}`);
-    console.log(`unidadesRecuperadas final: ${unidadesRecuperadasCalculadas}`);
-    console.log(`recirculacionRepercap final: ${recirculacionRepercapCalculada}`);
-    console.log(`tasaRecuperacionRepercap final: ${tasaRecuperacionRepercap}%`);
-    console.log(`tiempoTotal (minutos): ${tiempoTotalMinutos}`);
-    console.log(`tiempoActivo (minutos): ${tiempoActivoMinutos}`);
-    console.log(`tiempoPausadoTotal (minutos): ${tiempoPausadoTotalMinutos}`);
-    console.log(`standardReal: ${standardReal.toFixed(2)} unidades/hora`);
-    console.log(`OEE: ${(oee * 100).toFixed(2)}%`);
-    
-    // Actualizar orden deshabilitando hooks para evitar recálculos
-    await ordenF.update(datosActualizacion, { 
-      transaction,
-      hooks: false
-    });
-    
-    await transaction.commit();
-    
-    // Obtener la orden actualizada
-    const ordenActualizada = await OrdenFabricacion.findByPk(id, { 
-      include: ['pausas']
-    });
-    
-    // Notificar a través de socket.io
-    const io = req.app.get('io');
-    io.emit('ordenFabricacion:updated', ordenActualizada);
-    
-    return res.status(200).json({ 
-      message: 'Orden de fabricación finalizada correctamente',
-      orden: ordenActualizada,
-      calculoAutomatico: {
-        botesPorCaja: ordenF.botesPorCaja,
-        cajasContadas: ordenF.cajasContadas,
-        botesBuenosCalculados: botesBuenosCalculados,
-        unidadesRecuperadasCalculadas: unidadesRecuperadasCalculadas,
-        recirculacionRepercapCalculada: recirculacionRepercapCalculada,
-        tasaRecuperacionRepercapCalculada: tasaRecuperacionRepercap
-      }
-    });
-  } catch (error) {
-    await transaction.rollback();
-    console.error('Error al finalizar orden de fabricación:', error);
-    return res.status(500).json({ 
-      message: 'Error al finalizar orden de fabricación',
-      error: error.message 
-    });
-  }
-};// Incrementar el contador de botes buenos
+// Incrementar el contador de botes buenos
 exports.incrementarBotesBuenos = async (req, res) => {
   const transaction = await sequelize.transaction();
   
@@ -897,7 +958,9 @@ exports.establecerCajas = async (req, res) => {
       error: error.message 
     });
   }
-};// Incrementar botes expulsados
+};
+
+// Incrementar botes expulsados
 exports.incrementarBotesExpulsados = async (req, res) => {
   const transaction = await sequelize.transaction();
   
@@ -1040,7 +1103,9 @@ exports.establecerBotesPonderal = async (req, res) => {
       error: error.message 
     });
   }
-};// Simular el paso de tiempo en una orden activa
+};
+
+// Simular el paso de tiempo en una orden activa
 exports.simularTiempo = async (req, res) => {
   const transaction = await sequelize.transaction();
   

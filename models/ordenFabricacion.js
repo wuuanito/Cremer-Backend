@@ -356,6 +356,12 @@ const OrdenFabricacion = sequelize.define('OrdenFabricacion', {
   
   hooks: {
     beforeCreate: (orden, options) => {
+      const { DateTime } = require('luxon');
+
+// Guardar horaInicio en horario de Madrid (Europe/Madrid)
+if (!orden.horaInicio) {
+  orden.horaInicio = DateTime.now().setZone('Europe/Madrid').toJSDate();
+}
       try {
         console.log('Hook beforeCreate ejecutándose...');
         console.log('Datos de orden:', JSON.stringify(orden.dataValues, null, 2));
